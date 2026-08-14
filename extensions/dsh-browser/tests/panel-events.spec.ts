@@ -3,7 +3,10 @@ import { describe, expect, it } from 'vitest'
 import {
   appendLiveRow,
   completeLastTool,
+  isQuestionResolvedFrame,
+  isSessionEventFrame,
   mergeHistoryRows,
+  pendingQuestionFromFrame,
   rowFromEvent,
   textFromBlocks,
   toolSummary,
@@ -119,5 +122,55 @@ describe('mergeHistoryRows', () => {
 
   it('handles empty history', () => {
     expect(mergeHistoryRows([], () => 0)).toEqual([])
+  })
+})
+
+describe('pendingQuestionFromFrame', () => {
+  it('extracts a pending question from a question/requested mux frame', () => {
+    const pending = pendingQuestionFromFrame({
+      rpcId: 'rpc-1',
+      method: 'question/requested',
+      payload: {
+        type: 'question/requested',
+        sessionId: 's1',
+        questions: [{
+          id: 'mention_target',
+          question: '评论区 @王世楷，指的是哪一位？',
+          header: '确认 @ 目标',
+          options: [{ label: '小鹏内部王世楷', description: '同部门' }, { label: 'Karry' }],
+        }],
+      },
+    })
+    expect(pending).toEqual({
+      rpcId: 'rpc-1',
+      sessionId: 's1',
+      questions: [{
+        id: 'mention_target',
+        question: '评论区 @王世楷，指的是哪一位？',
+        header: '确认 @ 目标',
+        options: [{ label: '小鹏内部王世楷', description: '同部门' }, { label: 'Karry' }],
+      }],
+    })
+  })
+
+  it('rejects non-question frames and malformed payloads', () => {
+    expect(pendingQuestionFromFrame({ rpcId: 'r', method: 'session/event', payload: { sessionId: 's', event: {} } })).toBeNull()
+    expect(pendingQuestionFromFrame({ rpcId: 'r', method: 'question/requested', payload: null })).toBeNull()
+    expect(pendingQuestionFromFrame({ rpcId: 'r', method: 'question/requested', payload: { sessionId: 5, questions: [] } })).toBeNull()
+    expect(pendingQuestionFromFrame({ rpcId: 'r', method: 'question/requested', payload: { sessionId: 's', questions: 'nope' } })).toBeNull()
+  })
+})
+
+describe('isQuestionResolvedFrame / isSessionEventFrame', () => {
+  it('recognizes question/resolved by method', () => {
+    expect(isQuestionResolvedFrame({ rpcId: 'r', method: 'question/resolved', payload: { type: 'question/resolved', sessionId: 's', questionRpcId: 'q' } })).toBe(true)
+    expect(isQuestionResolvedFrame({ rpcId: 'r', method: 'question/requested', payload: {} })).toBe(false)
+  })
+
+  it('recognizes session/event frames for the matching session', () => {
+    const frame = { rpcId: 'r', method: 'session/event', payload: { sessionId: 's1', event: { type: 'turn/start' } } }
+    expect(isSessionEventFrame(frame, 's1')).toBe(true)
+    expect(isSessionEventFrame(frame, 's2')).toBe(false)
+    expect(isSessionEventFrame({ rpcId: 'r', method: 'question/requested', payload: { sessionId: 's1' } }, 's1')).toBe(false)
   })
 })

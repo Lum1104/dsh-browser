@@ -323,6 +323,9 @@ export class BridgeServer {
       case 'rpc':
         void this.handleRpc(frame)
         break
+      case 'respond':
+        void this.handleRespond(frame)
+        break
       case 'tool.result':
         this.settleTool(frame.id, frame.ok, frame.ok ? frame.result : frame.error)
         break
@@ -330,6 +333,7 @@ export class BridgeServer {
       case 'hello':
       case 'hello.ok':
       case 'rpc.result':
+      case 'respond.result':
       case 'event':
       case 'tool.call':
       case 'ping':
@@ -372,6 +376,44 @@ export class BridgeServer {
       sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result })
     } catch (error: unknown) {
       sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'internal', message: String(error) } })
+    }
+  }
+
+  /**
+   * Relay one client response for a pending host interaction (user question /
+   * approval) to the gateway's /api/respond endpoint. The envelope mirrors the
+   * GUI client's `client-response` full form: the question's own rpcId plus the
+   * result ({ ok: true, value } or { ok: false, error }). The gateway routes
+   * the response through its pending table and settles the blocked tool call.
+   * @param frame - parsed `respond` frame.
+   */
+  private async handleRespond(frame: Extract<ClientFrame, { t: 'respond' }>): Promise<void> {
+    const conn = this.current
+    /* v8 ignore next -- replacement race: a frame can land between a socket
+    replacement and the next promotion; the re-check keeps the handler total */
+    if (conn === null) return
+    const body = JSON.stringify({ type: 'client-response', rpcId: frame.rpcId, result: frame.result })
+    const request = new Request(new URL('/api/respond', 'http://dsh.internal'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    })
+    try {
+      const response = await this.deps.apiHandler.fetch(request)
+      const text = await response.text()
+      if (!response.ok) {
+        sendFrame(conn.ws, { t: 'respond.result', id: frame.id, ok: false, error: { code: 'http', message: text } })
+        return
+      }
+      let result: unknown
+      try {
+        result = JSON.parse(text)
+      } catch {
+        result = text
+      }
+      sendFrame(conn.ws, { t: 'respond.result', id: frame.id, ok: true, result })
+    } catch (error: unknown) {
+      sendFrame(conn.ws, { t: 'respond.result', id: frame.id, ok: false, error: { code: 'internal', message: String(error) } })
     }
   }
 

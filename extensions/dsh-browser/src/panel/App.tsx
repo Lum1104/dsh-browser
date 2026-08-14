@@ -19,9 +19,14 @@ import whaleUrl from '../../assets/icons/deepseek-256.png'
 import {
   appendLiveRow,
   completeLastTool,
+  isQuestionResolvedFrame,
   mergeHistoryRows,
+  pendingQuestionFromFrame,
   rowFromEvent,
   toolSummary,
+  type EventFrameView,
+  type PendingQuestion,
+  type QuestionItem,
   type Row,
   type SessionEventView,
 } from './events.ts'
@@ -103,6 +108,106 @@ const ToolActivity = memo(function ToolActivity({ row }: { row: Row }): React.JS
   )
 })
 
+/** 单个问题的草稿：已选项 + 自定义答案。 */
+interface QuestionDraft {
+  selected: string[]
+  custom: string
+}
+
+/**
+ * 待回答问题卡片：agent 调用 ask_user_question 后，主界面会弹问题卡片，
+ * 但侧边栏此前看不到也答不了（表现为一直转圈）。这里把问题渲染出来，
+ * 答案通过桥的 /api/respond 通道回传。
+ */
+function QuestionCard({
+  question,
+  drafts,
+  draftOf,
+  onToggleOption,
+  onCustom,
+  onSubmit,
+  onCancel,
+  submitting,
+}: {
+  question: PendingQuestion
+  drafts: Record<string, QuestionDraft>
+  draftOf: (questionId: string) => QuestionDraft
+  onToggleOption: (item: QuestionItem, label: string, checked: boolean) => void
+  onCustom: (item: QuestionItem, value: string) => void
+  onSubmit: () => void
+  onCancel: () => void
+  submitting: boolean
+}): React.JSX.Element {
+  return (
+    <div className="question-card" role="status" aria-label="等待回答">
+      <div className="question-heading">
+        <span className="question-mark">?</span>
+        <div>
+          <span className="eyebrow">等待回答</span>
+          <h1>助手需要你确认</h1>
+        </div>
+      </div>
+      {question.questions.map((item, index) => {
+        const draft = draftOf(item.id)
+        const multi = item.multiSelect === true
+        return (
+          <div className="question-item" key={item.id}>
+            <div className="question-copy">
+              {question.questions.length > 1 && <span className="question-index">{index + 1}.</span>}
+              <strong>{item.header ?? item.question}</strong>
+              {item.detail !== undefined && item.detail !== '' && <small>{item.detail}</small>}
+            </div>
+            {Array.isArray(item.options) && item.options.length > 0 && (
+              <div className="question-options" role={multi ? 'group' : 'radiogroup'}>
+                {item.options.map((option) => {
+                  const checked = draft.selected.includes(option.label)
+                  return (
+                    <label key={option.label} className={`question-option ${checked ? 'checked' : ''}`}>
+                      <input
+                        type={multi ? 'checkbox' : 'radio'}
+                        name={`q-${item.id}`}
+                        checked={checked}
+                        onChange={(e) => onToggleOption(item, option.label, e.target.checked)}
+                      />
+                      <span className="question-option-copy">
+                        <span>{option.label}</span>
+                        {option.description !== undefined && option.description !== '' && <small>{option.description}</small>}
+                      </span>
+                    </label>
+                  )
+                })}
+              </div>
+            )}
+            <label className="question-custom">
+              <input
+                type="text"
+                placeholder="输入你的答案"
+                value={draft.custom}
+                disabled={submitting}
+                onChange={(e) => onCustom(item, e.target.value)}
+              />
+            </label>
+          </div>
+        )
+      })}
+      <div className="question-actions">
+        <button className="primary" onClick={onSubmit} disabled={submitting || !allQuestionsAnswered(question, drafts)}>
+          {submitting ? '提交中…' : '提交'}
+        </button>
+        <button className="secondary" onClick={onCancel} disabled={submitting}>放弃</button>
+      </div>
+    </div>
+  )
+}
+
+/** 提交按钮可用性：每个问题都必须已作答（选项或自定义答案）。 */
+function allQuestionsAnswered(question: PendingQuestion, drafts: Record<string, QuestionDraft>): boolean {
+  return question.questions.every((item) => {
+    const draft = drafts[item.id]
+    return draft !== undefined && (draft.selected.length > 0 || draft.custom.trim() !== '')
+  })
+}
+
 export function App(): React.JSX.Element {
   const [api] = useState<PanelApi>(() => connectPanel())
   const [state, setState] = useState<BridgeState>('stopped')
@@ -115,11 +220,105 @@ export function App(): React.JSX.Element {
   const [working, setWorking] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [question, setQuestion] = useState<PendingQuestion | null>(null)
+  const [questionDrafts, setQuestionDrafts] = useState<Record<string, QuestionDraft>>({})
+  const [submitting, setSubmitting] = useState(false)
+  const respondSeq = useRef(0)
   const seqRef = useRef(0)
   const sessionRef = useRef<string | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
 
   const nextSeq = (): number => { seqRef.current += 1; return seqRef.current }
+
+  /** 单个问题的草稿（选项/自定义答案）。 */
+  const draftOf = (questionId: string): QuestionDraft => questionDrafts[questionId] ?? { selected: [], custom: '' }
+
+  const setDraft = (questionId: string, patch: Partial<QuestionDraft>): void => {
+    setQuestionDrafts((prev) => ({
+      ...prev,
+      [questionId]: { ...(prev[questionId] ?? { selected: [], custom: '' }), ...patch },
+    }))
+  }
+
+  const toggleOption = (item: QuestionItem, label: string, checked: boolean): void => {
+    const draft = draftOf(item.id)
+    if (item.multiSelect === true) {
+      const selected = checked
+        ? [...draft.selected, label]
+        : draft.selected.filter((existing) => existing !== label)
+      setDraft(item.id, { selected, custom: '' })
+    } else {
+      setDraft(item.id, { selected: checked ? [label] : [], custom: '' })
+    }
+  }
+
+  const changeCustom = (item: QuestionItem, value: string): void => {
+    const draft = draftOf(item.id)
+    // 自定义答案会清空单选（与主界面行为一致）；多选保留已选项。
+    setDraft(item.id, { selected: item.multiSelect === true ? draft.selected : [], custom: value })
+  }
+
+  /** 把答案回传给桥 /api/respond，解除 agent 的等待。 */
+  async function submitQuestion(): Promise<void> {
+    if (question === null || submitting) return
+    if (!allQuestionsAnswered(question, questionDrafts)) {
+      setError('请先完成这道问题。')
+      return
+    }
+    setSubmitting(true)
+    setError(null)
+    const answers = question.questions.map((item) => {
+      const draft = draftOf(item.id)
+      return { id: item.id, selected: draft.selected, ...(draft.custom.trim() !== '' ? { custom: draft.custom.trim() } : {}) }
+    })
+    try {
+      const receipt = await api.respond(`respond-${++respondSeq.current}`, question.rpcId, {
+        ok: true,
+        value: { sessionId: question.sessionId, answer: { answers } },
+      }) as { accepted?: boolean }
+      if (receipt.accepted === false) {
+        setError('问题应答被拒绝，可能已被处理。')
+        return
+      }
+      setQuestion(null)
+      setQuestionDrafts({})
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  /** 放弃整组问题（agent 的 ask_user_question 以 cancelled 结算）。 */
+  async function cancelQuestion(): Promise<void> {
+    if (question === null || submitting) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      await api.respond(`respond-${++respondSeq.current}`, question.rpcId, {
+        ok: false,
+        error: { code: 'cancelled', message: 'the user closed this question request' },
+      })
+      setQuestion(null)
+      setQuestionDrafts({})
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  /** 停止当前正在运行的 turn（等价于主界面的“停止生成”）。 */
+  async function stopTurn(): Promise<void> {
+    const id = sessionRef.current
+    if (id === null) return
+    setError(null)
+    try {
+      await api.rpc('session.cancel', { sessionId: id })
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
 
   // Settings: seed from storage, then let the panel own the form.
   useEffect(() => {
@@ -193,7 +392,24 @@ export function App(): React.JSX.Element {
   /** Live frame handling: session events append rows; turn/end reconciles with history. */
   async function onFrame(frame: ServerFrame): Promise<void> {
     if (frame.t !== 'event') return
-    const payload = frame.frame.payload as { sessionId?: string; event?: SessionEventView } | undefined
+    const inner = frame.frame as EventFrameView
+    // 待回答的问题：agent 卡在 ask_user_question 上。侧边栏必须能直接应答，
+    // 否则面板会一直显示“正在操作页面 ask_user_question”转圈（假死）。
+    const pending = pendingQuestionFromFrame(inner)
+    if (pending !== null) {
+      if (pending.sessionId === sessionRef.current) {
+        setQuestion(pending)
+        setQuestionDrafts({})
+        setError(null)
+      }
+      return
+    }
+    if (isQuestionResolvedFrame(inner)) {
+      setQuestion(null)
+      setQuestionDrafts({})
+      return
+    }
+    const payload = inner.payload as { sessionId?: string; event?: SessionEventView } | undefined
     if (payload?.sessionId !== sessionRef.current || payload.event === undefined) return
     if (payload.event.type === 'turn/start') {
       setWorking(true)
@@ -372,7 +588,7 @@ export function App(): React.JSX.Element {
             {row.kind === 'tool' ? <ToolActivity row={row} /> : <MessageBody row={row} />}
           </div>
         ))}
-        {working && rows[rows.length - 1]?.status !== 'running' && (
+        {working && question === null && rows[rows.length - 1]?.status !== 'running' && (
           <div className="ai-progress" role="status" aria-label="助手正在处理">
             <span className="assistant-avatar"><img src={whaleUrl} alt="" /></span>
             <span className="progress-dots" aria-hidden="true"><i /><i /><i /></span>
@@ -380,6 +596,18 @@ export function App(): React.JSX.Element {
           </div>
         )}
       </div>
+      {question !== null && (
+        <QuestionCard
+          question={question}
+          drafts={questionDrafts}
+          draftOf={draftOf}
+          onToggleOption={toggleOption}
+          onCustom={changeCustom}
+          onSubmit={() => void submitQuestion()}
+          onCancel={() => void cancelQuestion()}
+          submitting={submitting}
+        />
+      )}
       {error !== null && <div className="error">{error}</div>}
       <footer className="composer">
         <div className="composer-box">
@@ -399,7 +627,13 @@ export function App(): React.JSX.Element {
           />
           <div className="composer-actions">
             <span>Enter 发送 · Shift + Enter 换行</span>
-            <button onClick={() => void send()} disabled={state !== 'connected' || busy || input.trim() === ''} aria-label="发送消息"><SendIcon /></button>
+            {working ? (
+              <button className="stop" onClick={() => void stopTurn()} aria-label="停止生成" title="停止当前回合">
+                停止
+              </button>
+            ) : (
+              <button onClick={() => void send()} disabled={state !== 'connected' || busy || input.trim() === ''} aria-label="发送消息"><SendIcon /></button>
+            )}
           </div>
         </div>
       </footer>

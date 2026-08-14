@@ -7,9 +7,11 @@
  *
  * Panel port protocol (chrome.runtime.connect, name "dsh-panel"):
  *   panel → bg: { type: 'rpc', id, method, payload }
+ *   panel → bg: { type: 'respond', id, rpcId, result }
  *   panel → bg: { type: 'settings', settings: Partial<Settings> }
  *   panel → bg: { type: 'request-status' }
  *   bg → panel: { type: 'rpc.result', id, ok, result? | error? }
+ *   bg → panel: { type: 'respond.result', id, ok, result? | error? }
  *   bg → panel: { type: 'status', state: BridgeState, caps? }
  *   bg → panel: { type: 'event', frame: ServerFrame }
  *
@@ -17,6 +19,7 @@
  */
 
 import type { BridgeCaps } from '@deepseek-ai/dsh-bridge-browser/src/protocol.ts'
+import type { RespondResult } from '@deepseek-ai/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@deepseek-ai/dsh-bridge-browser/src/protocol.ts'
 import { BRIDGE_CONFIG_PATH, BRIDGE_PATH } from '@deepseek-ai/dsh-bridge-browser/src/protocol.ts'
 import { BridgeClient, type BridgeState } from './bridge.ts'
@@ -112,6 +115,15 @@ function broadcastEvent(frame: ServerFrame): void {
   }
 }
 
+/** Relay an interaction-answer receipt from the bridge to every panel port. */
+function broadcastRespondResult(id: string, ok: boolean, result?: unknown, error?: { code: string; message: string }): void {
+  for (const port of panelPorts) {
+    try {
+      port.postMessage({ type: 'respond.result', id, ok, ...(ok ? { result } : { error }) })
+    } catch { /* port already closed */ }
+  }
+}
+
 /** 把协商的快照预算下发到活动标签页的 content script（配置生效）。 */
 async function pushBudgetToActiveTab(negotiated: BridgeCaps): Promise<void> {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
@@ -171,6 +183,9 @@ async function startBridge(): Promise<void> {
       onFrame: (frame) => {
         if (frame.t === 'event') broadcastEvent(frame)
         else if (frame.t === 'tool.call') routeToolCall(frame)
+        else if (frame.t === 'respond.result') {
+          broadcastRespondResult(frame.id, frame.ok, frame.ok ? frame.result : undefined, frame.ok ? undefined : frame.error)
+        }
         // rpc.result is settled by the rpc facade (wrapped below).
       },
       onHelloOk: (negotiated) => {
@@ -221,6 +236,22 @@ chrome.runtime.onConnect.addListener((port) => {
             } catch { /* port closed */ }
           },
         )
+        break
+      }
+      case 'respond': {
+        const respondMsg = message as { id: string; rpcId: string; result: RespondResult }
+        if (bridge === null || !bridge.connected) {
+          try {
+            port.postMessage({
+              type: 'respond.result',
+              id: respondMsg.id,
+              ok: false,
+              error: { code: 'bridge-unavailable', message: '未连接 dsh（请检查设置中的地址与 token）' },
+            })
+          } catch { /* port closed */ }
+          break
+        }
+        bridge.send({ t: 'respond', id: respondMsg.id, rpcId: respondMsg.rpcId, result: respondMsg.result })
         break
       }
       case 'settings': {

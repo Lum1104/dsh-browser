@@ -26,6 +26,58 @@ export interface SessionEventView {
   }
 }
 
+/** One option of a pending question (mirrors askUserQuestionItemSchema). */
+export interface QuestionOption {
+  label: string
+  description?: string
+}
+
+/** One item of a pending question batch. */
+export interface QuestionItem {
+  id: string
+  question: string
+  header?: string
+  detail?: string
+  options?: QuestionOption[]
+  multiSelect?: boolean
+}
+
+/** A pending host interaction rendered as a question card (question/requested). */
+export interface PendingQuestion {
+  /** The mux envelope rpcId, echoed back when answering. */
+  rpcId: string
+  sessionId: string
+  questions: QuestionItem[]
+}
+
+/** The event-frame shape the bridge relays for one mux envelope. */
+export interface EventFrameView {
+  rpcId: string
+  method: string
+  payload: unknown
+}
+
+/** Extract a pending question from a `question/requested` mux frame (or null). */
+export function pendingQuestionFromFrame(frame: EventFrameView): PendingQuestion | null {
+  if (frame.method !== 'question/requested') return null
+  if (typeof frame.payload !== 'object' || frame.payload === null) return null
+  const payload = frame.payload as { sessionId?: unknown; questions?: unknown }
+  if (typeof payload.sessionId !== 'string' || !Array.isArray(payload.questions)) return null
+  return { rpcId: frame.rpcId, sessionId: payload.sessionId, questions: payload.questions as QuestionItem[] }
+}
+
+/** Whether a mux frame marks an earlier question as resolved. */
+export function isQuestionResolvedFrame(frame: EventFrameView): boolean {
+  return frame.method === 'question/resolved'
+}
+
+/** Whether a mux frame is a session event for a given session (session/event). */
+export function isSessionEventFrame(frame: EventFrameView, sessionId: string): boolean {
+  if (typeof frame.payload !== 'object' || frame.payload === null) return false
+  const payload = frame.payload as { sessionId?: unknown; event?: unknown }
+  return payload.sessionId === sessionId && typeof payload.event === 'object' && payload.event !== null
+}
+
 /** Extract model-visible text from content blocks (defensive: unknown block shapes degrade to markers). */
 export function textFromBlocks(blocks: unknown): string {
   if (!Array.isArray(blocks)) return String(blocks ?? '')

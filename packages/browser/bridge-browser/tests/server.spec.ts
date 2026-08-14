@@ -200,6 +200,47 @@ describe('BridgeServer', () => {
     ws.close()
   })
 
+  it('relays interaction answers to /api/respond as client-response envelopes', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, frames } = await connect(h.url)
+    send(ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
+    send(ws, {
+      t: 'respond',
+      id: 'ans-1',
+      rpcId: 'q1',
+      result: { ok: true, value: { sessionId: 's1', answer: { answers: [{ id: 'mention_target', selected: ['小鹏内部王世楷'] }] } } },
+    })
+    await waitFor(() => frames.some((f) => f.t === 'respond.result'))
+    const result = frames.find((f) => f.t === 'respond.result')
+    expect(result).toMatchObject({ t: 'respond.result', id: 'ans-1', ok: true })
+    expect(h.fetchMock).toHaveBeenCalledTimes(1)
+    const request = h.fetchMock.mock.calls[0]![0] as Request
+    expect(request.url).toBe('http://dsh.internal/api/respond')
+    expect(request.method).toBe('POST')
+    expect(request.headers.get('content-type')).toBe('application/json')
+    expect(JSON.parse(await request.text())).toEqual({
+      type: 'client-response',
+      rpcId: 'q1',
+      result: { ok: true, value: { sessionId: 's1', answer: { answers: [{ id: 'mention_target', selected: ['小鹏内部王世楷'] }] } } },
+    })
+    ws.close()
+  })
+
+  it('reports /api/respond failures as respond.result errors', async () => {
+    const h = await startBridge({ apiHandler: { fetch: async () => new Response('handler failure: boom', { status: 500 }) } })
+    harnesses.push(h)
+    const { ws, frames } = await connect(h.url)
+    send(ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
+    send(ws, { t: 'respond', id: 'ans-2', rpcId: 'q2', result: { ok: false, error: { code: 'cancelled', message: 'closed' } } })
+    await waitFor(() => frames.some((f) => f.t === 'respond.result' && f.id === 'ans-2'))
+    expect(frames.find((f) => f.t === 'respond.result' && f.id === 'ans-2'))
+      .toMatchObject({ t: 'respond.result', id: 'ans-2', ok: false, error: { code: 'http' } })
+    ws.close()
+  })
+
   it('rejects privileged methods from non-loopback remotes', async () => {
     expect(isLoopbackAddress('127.0.0.1')).toBe(true)
     expect(isLoopbackAddress('::1')).toBe(true)

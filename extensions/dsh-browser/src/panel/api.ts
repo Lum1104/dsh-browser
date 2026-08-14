@@ -21,6 +21,14 @@ interface RpcResultMessage {
   error?: { code: string; message: string }
 }
 
+interface RespondResultMessage {
+  type: 'respond.result'
+  id: string
+  ok: boolean
+  result?: unknown
+  error?: { code: string; message: string }
+}
+
 interface StatusMessage {
   type: 'status'
   state: BridgeState
@@ -32,11 +40,16 @@ interface EventMessage {
   frame: ServerFrame
 }
 
-type BackgroundMessage = RpcResultMessage | StatusMessage | EventMessage
+type BackgroundMessage = RpcResultMessage | RespondResultMessage | StatusMessage | EventMessage
 
 /** The panel API surface. */
 export interface PanelApi {
   rpc<T = unknown>(method: string, payload?: unknown): Promise<T>
+  /**
+   * Answer a pending host interaction (user question / approval) by its rpcId.
+   * Resolves with the gateway's receipt ({ accepted }).
+   */
+  respond(id: string, rpcId: string, result: { ok: boolean; value?: unknown; error?: { code: string; message: string } }): Promise<unknown>
   onStatus(callback: (state: BridgeState, caps: BridgeCaps | null) => void): () => void
   onEvent(callback: (frame: ServerFrame) => void): () => void
   updateSettings(settings: Partial<PanelSettings>): void
@@ -47,6 +60,7 @@ export interface PanelApi {
 export function connectPanel(): PanelApi {
   const port = chrome.runtime.connect({ name: 'dsh-panel' })
   const pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>()
+  const pendingRespond = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>()
   const statusListeners = new Set<(state: BridgeState, caps: BridgeCaps | null) => void>()
   const eventListeners = new Set<(frame: ServerFrame) => void>()
 
@@ -70,6 +84,14 @@ export function connectPanel(): PanelApi {
       case 'status':
         for (const listener of statusListeners) listener(msg.state, msg.caps)
         break
+      case 'respond.result': {
+        const entry = pendingRespond.get(msg.id)
+        if (entry === undefined) return
+        pendingRespond.delete(msg.id)
+        if (msg.ok) entry.resolve(msg.result)
+        else entry.reject(new Error(msg.error?.message ?? 'respond failed'))
+        break
+      }
       case 'event':
         for (const listener of eventListeners) listener(msg.frame)
         break
@@ -80,6 +102,8 @@ export function connectPanel(): PanelApi {
     const error = new Error('background disconnected')
     for (const entry of pending.values()) entry.reject(error)
     pending.clear()
+    for (const entry of pendingRespond.values()) entry.reject(error)
+    pendingRespond.clear()
   })
 
   return {
@@ -88,6 +112,12 @@ export function connectPanel(): PanelApi {
       return new Promise<T>((resolve, reject) => {
         pending.set(id, { resolve: (value) => resolve(value as T), reject })
         port.postMessage({ type: 'rpc', id, method, payload })
+      })
+    },
+    respond(id, rpcId, result): Promise<unknown> {
+      return new Promise((resolve, reject) => {
+        pendingRespond.set(id, { resolve, reject })
+        port.postMessage({ type: 'respond', id, rpcId, result })
       })
     },
     onStatus(callback) {

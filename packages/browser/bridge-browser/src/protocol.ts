@@ -43,6 +43,15 @@ export interface ToolError {
   message: string
 }
 
+/**
+ * Answer payload for a pending host interaction (user question / approval).
+ * Mirrors the GUI's client-response `result` slot — the bridge adds the
+ * `client-response` envelope when it forwards the frame to `/api/respond`.
+ */
+export type RespondResult =
+  | { ok: true; value?: unknown }
+  | { ok: false; error: { code: string; message: string } }
+
 /** Capabilities negotiated in `hello`/`hello.ok`. The extension performs its own actions; these bounds shape page snapshots. */
 export interface BridgeCaps {
   /** The extension renders page state as text only (no screenshots). */
@@ -59,6 +68,8 @@ export type ClientFrame =
   | { t: 'hello'; token: string; caps: BridgeCaps }
   /** Unary gateway RPC passthrough (method names from the apiproxy RpcMethodMap). */
   | { t: 'rpc'; id: string; method: string; payload: unknown }
+  /** Answer a pending host interaction; the bridge relays it to /api/respond. */
+  | { t: 'respond'; id: string; rpcId: string; result: RespondResult }
   /** Result of a previously dispatched tool call. */
   | { t: 'tool.result'; id: string; ok: true; result: unknown }
   | { t: 'tool.result'; id: string; ok: false; error: ToolError }
@@ -72,6 +83,9 @@ export type ServerFrame =
   /** Reply to an `rpc` frame; `result` is the apiproxy ServerResponse envelope. */
   | { t: 'rpc.result'; id: string; ok: true; result: unknown }
   | { t: 'rpc.result'; id: string; ok: false; error: { code: string; message: string } }
+  /** Reply to a `respond` frame; `result` is the /api/respond receipt ({ accepted }). */
+  | { t: 'respond.result'; id: string; ok: true; result: unknown }
+  | { t: 'respond.result'; id: string; ok: false; error: { code: string; message: string } }
   /** One gateway event envelope (the same server-request shape the GUI's /api/events.mux carries). */
   | { t: 'event'; frame: { rpcId: string; method: string; payload: unknown } }
   /** A model-requested browser action to execute in the active tab. */
@@ -94,6 +108,7 @@ export type BridgeFrame = ClientFrame | ServerFrame
 export function isServerFrame(frame: BridgeFrame): frame is ServerFrame {
   return frame.t === 'hello.ok'
     || frame.t === 'rpc.result'
+    || frame.t === 'respond.result'
     || frame.t === 'event'
     || frame.t === 'tool.call'
     || frame.t === 'ping'
@@ -107,7 +122,7 @@ export function isServerFrame(frame: BridgeFrame): frame is ServerFrame {
  * @returns true for client-sendable frames.
  */
 export function isClientFrame(frame: BridgeFrame): frame is ClientFrame {
-  return frame.t === 'hello' || frame.t === 'rpc' || frame.t === 'tool.result' || frame.t === 'pong'
+  return frame.t === 'hello' || frame.t === 'rpc' || frame.t === 'respond' || frame.t === 'tool.result' || frame.t === 'pong'
 }
 
 /**
@@ -135,6 +150,10 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
       return typeof frame.id === 'string' && typeof frame.method === 'string'
         ? { t: 'rpc', id: frame.id, method: frame.method, payload: frame.payload }
         : undefined
+    case 'respond':
+      return typeof frame.id === 'string' && typeof frame.rpcId === 'string' && isRespondResult(frame.result)
+        ? { t: 'respond', id: frame.id, rpcId: frame.rpcId, result: frame.result }
+        : undefined
     case 'tool.result':
       if (typeof frame.id !== 'string') return undefined
       if (frame.ok === true && 'result' in frame) {
@@ -156,6 +175,14 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
       }
       return typeof frame.error === 'object' && frame.error !== null
         ? { t: 'rpc.result', id: frame.id, ok: false, error: frame.error as { code: string; message: string } }
+        : undefined
+    case 'respond.result':
+      if (typeof frame.id !== 'string') return undefined
+      if (frame.ok === true && 'result' in frame) {
+        return { t: 'respond.result', id: frame.id, ok: true, result: frame.result }
+      }
+      return typeof frame.error === 'object' && frame.error !== null
+        ? { t: 'respond.result', id: frame.id, ok: false, error: frame.error as { code: string; message: string } }
         : undefined
     case 'event':
       return typeof frame.frame === 'object' && frame.frame !== null
@@ -189,4 +216,11 @@ function isToolError(value: unknown): value is ToolError {
   return typeof value === 'object' && value !== null
     && typeof (value as Record<string, unknown>).code === 'string'
     && typeof (value as Record<string, unknown>).message === 'string'
+}
+
+function isRespondResult(value: unknown): value is RespondResult {
+  if (typeof value !== 'object' || value === null) return false
+  const result = value as Record<string, unknown>
+  if (result.ok === true && result.error === undefined) return true
+  return result.ok === false && isToolError(result.error)
 }
