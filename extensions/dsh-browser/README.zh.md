@@ -15,7 +15,7 @@ dsh 的**浏览器操作端**：让模型直接读取并操作你在浏览器里
 | 填写表单 | `browser_type` | 输入文本，`replace` 清空重填 |
 | 按键 | `browser_press` | Enter/Tab/Escape/方向键等 |
 | 滚动 | `browser_scroll` | 视口滚动（up/down/top/bottom） |
-| 导航 | `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | 当前标签页内跳转，登录态保留 |
+| 导航 | `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | 当前标签页内跳转，登录态保留；可在设置中选择新标签页/新窗口打开 |
 | 读区域 | `browser_get_text` | 懒加载内容 / 局部文本 |
 | 等待 | `browser_wait` | 页面加载与渲染稳定检测 |
 
@@ -96,6 +96,7 @@ pnpm --filter dsh-browser-extension run test
 - **delta 模式**：`browser_snapshot({delta:true})` 只返回变化元素的编号，省 token。
 - **隐私**：密码/卡号字段的值永远以 `••••` 呈现，绝不回传；可访问名称从不使用敏感字段的当前值。
 - **分级审批**：默认「自动共享」允许模型按需读取活动标签页而不额外弹窗；「每次询问」可恢复逐次读取确认，「关闭」会阻断读取。在「每次询问」模式下，读取弹窗可以仅允许一次，也可以持久切回自动读取，之后仍可在设置中关闭。状态变更工具仍然失败关闭，并显示实际 origin 和脱敏动作摘要；用户可拒绝、仅允许一次，或只在当前侧栏会话中信任单个 origin。最后一个侧栏关闭或 Service Worker 重启会清空临时信任；永久信任需在设置中显式管理。显式跨域 `browser_navigate` / 未知目标的历史跳转不继承信任，侧边栏关闭时一律拒绝。调用方取消或桥接超时时，会先撤销尚未完成的审批，过期动作不会继续执行。
+- **打开页面的方式**：设置面板可选 `browser_navigate` 的打开目标——当前标签页（默认）、新标签页或新窗口。选择新标签页/新窗口时，你正在看的页面不会被覆盖，适合助手查链接、你继续读当前页的场景；新建的标签页会成为后续快照/点击工具操作的目标。
 
 ## 权限说明
 

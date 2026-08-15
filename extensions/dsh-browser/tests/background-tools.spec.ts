@@ -320,4 +320,51 @@ describe('dispatchToolCall', () => {
     expect(seen).toEqual([{ frameId: 0, delta: true }, { frameId: 6, delta: false }])
     expect(chromeMock.getAllFrames).toHaveBeenCalledTimes(3)
   })
+
+  it('opens a new tab for browser_navigate when navigationTarget is new-tab', async () => {
+    const create = vi.fn(async () => ({ id: 99, url: 'https://example.com/page' }))
+    vi.stubGlobal('chrome', { tabs: { create }, windows: { create: vi.fn() } })
+    const navigateCall: ToolCall = { id: 'nav', name: 'browser_navigate', args: { url: 'https://example.com/page' } }
+
+    const answer = await dispatchToolCall(navigateCall, 'auto', undefined, async () => true, undefined, 'new-tab')
+
+    expect(answer).toMatchObject({ ok: true })
+    expect(answer.result).toMatchObject({ text: expect.stringContaining('新标签页'), url: 'https://example.com/page', tabId: 99 })
+    expect(create).toHaveBeenCalledWith({ url: 'https://example.com/page', active: true })
+  })
+
+  it('opens a new window for browser_navigate when navigationTarget is new-window', async () => {
+    const create = vi.fn(async () => ({ id: 101, tabs: [{ id: 102, url: 'https://example.com/w' }] }))
+    vi.stubGlobal('chrome', { tabs: { create: vi.fn() }, windows: { create } })
+    const navigateCall: ToolCall = { id: 'nav', name: 'browser_navigate', args: { url: 'https://example.com/w' } }
+
+    const answer = await dispatchToolCall(navigateCall, 'auto', undefined, async () => true, undefined, 'new-window')
+
+    expect(answer).toMatchObject({ ok: true })
+    expect(answer.result).toMatchObject({ text: expect.stringContaining('新窗口'), url: 'https://example.com/w', tabId: 102 })
+    expect(create).toHaveBeenCalledWith({ url: 'https://example.com/w', focused: true })
+  })
+
+  it('rejects a non-http(s) navigation URL before opening a new tab', async () => {
+    vi.stubGlobal('chrome', { tabs: { create: vi.fn() }, windows: { create: vi.fn() } })
+    const navigateCall: ToolCall = { id: 'nav', name: 'browser_navigate', args: { url: 'javascript:alert(1)' } }
+
+    const answer = await dispatchToolCall(navigateCall, 'auto', undefined, async () => true, undefined, 'new-tab')
+
+    expect(answer).toMatchObject({ ok: false, error: { code: 'action-failed' } })
+  })
+
+  it('keeps navigating the active tab when navigationTarget is current', async () => {
+    const chromeMock = mockChrome({ tab: { id: 7, url: 'https://example.com' } })
+    const navigateCall: ToolCall = { id: 'nav', name: 'browser_navigate', args: { url: 'https://example.com/next' } }
+
+    await dispatchToolCall(navigateCall, 'auto', undefined, async () => true)
+
+    expect(chromeMock.query).toHaveBeenCalled()
+    expect(chromeMock.sendMessage).toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({ type: 'DSH_ACTION', action: 'browser_navigate' }),
+      expect.anything(),
+    )
+  })
 })

@@ -204,12 +204,53 @@ async function dispatchOnce(
 }
 
 /**
+ * Open a navigation URL in a new tab or a new window instead of steering the
+ * user's active tab. The active page is left untouched; the freshly created
+ * tab becomes the focused target for subsequent snapshot/click tools.
+ */
+async function openNavigationTarget(
+  call: ToolCall,
+  target: 'new-tab' | 'new-window',
+  authorize?: (prompt: ApprovalPrompt) => Promise<boolean>,
+  signal?: AbortSignal,
+): Promise<ToolAnswer> {
+  const url = typeof call.args.url === 'string' ? call.args.url : ''
+  if (!/^https?:\/\//i.test(url)) {
+    return { ok: false, error: { code: 'action-failed', message: 'browser_navigate 需要完整的 http/https URL' } }
+  }
+  const approval = approvalPromptForCall({ ...call, name: 'browser_navigate' }, 'auto', [])
+  if (approval !== undefined) {
+    const allowed = authorize === undefined ? false : await authorize(approval)
+    if (isCancelled(call, signal)) return cancelled()
+    if (!allowed) return { ok: false, error: { code: 'action-failed', message: '用户未批准读取或页面操作' } }
+  }
+  if (isCancelled(call, signal)) return cancelled()
+  try {
+    if (target === 'new-window') {
+      const created = await chrome.windows.create({ url, focused: true })
+      const tabId = created.tabs?.[0]?.id
+      return {
+        ok: true,
+        result: { text: `已在新窗口打开: ${url}`, url, tabId: tabId ?? undefined },
+      }
+    }
+    const created = await chrome.tabs.create({ url, active: true })
+    return { ok: true, result: { text: `已在新标签页打开: ${url}`, url, tabId: created.id } }
+  } catch {
+    return { ok: false, error: { code: 'action-failed', message: target === 'new-window' ? '无法新开窗口' : '无法新开标签页' } }
+  }
+}
+
+/**
  * Dispatch one tool call to the active tab's content script.
  * @param call - the tool call to execute.
  * @param sharePageContent - the user's page-sharing preference ('off' blocks
  *   every page-content read).
  * @param budget - snapshot limits to restore after on-demand content-script injection.
  * @param signal - bridge lifetime; cancellation prevents any not-yet-sent page action.
+ * @param navigationTarget - where `browser_navigate` opens URLs: the active tab
+ *   (default), a new tab, or a new window. The user's active page is never
+ *   disturbed when a new tab or window is chosen.
  * @returns the content script's answer, or a stable error when no tab or
  *   content script is available.
  */
@@ -219,11 +260,15 @@ export async function dispatchToolCall(
   budget?: ContentBudget,
   authorize?: (prompt: ApprovalPrompt) => Promise<boolean>,
   signal?: AbortSignal,
+  navigationTarget: 'current' | 'new-tab' | 'new-window' = 'current',
 ): Promise<ToolAnswer> {
   if (isCancelled(call, signal)) return cancelled()
   // Privacy boundary: with sharing off, no page content may leave the page.
   if (sharePageContent === 'off' && (call.name === 'browser_snapshot' || call.name === 'browser_get_text')) {
     return { ok: false, error: { code: 'action-failed', message: '页面内容共享已关闭（设置 → 页面内容共享）' } }
+  }
+  if (call.name === 'browser_navigate' && navigationTarget !== 'current') {
+    return openNavigationTarget(call, navigationTarget, authorize, signal)
   }
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
   if (isCancelled(call, signal)) return cancelled()

@@ -38,6 +38,8 @@ export interface Settings {
   bridgeUrl: string
   token: string
   sharePageContent: 'ask' | 'auto' | 'off'
+  /** Where browser_navigate opens the URL: active tab (default), a new tab, or a new window. */
+  navigationTarget: 'current' | 'new-tab' | 'new-window'
   /** Origins whose state-changing actions may run without another prompt. */
   trustedActionOrigins: string[]
 }
@@ -47,6 +49,7 @@ const SETTINGS_DEFAULTS: Settings = {
   bridgeUrl: '',
   token: '',
   sharePageContent: 'auto',
+  navigationTarget: 'current',
   trustedActionOrigins: [],
 }
 
@@ -128,7 +131,10 @@ function normalizeSettings(candidate: Settings): Settings {
   const sharePageContent = candidate.sharePageContent === 'auto' || candidate.sharePageContent === 'off'
     ? candidate.sharePageContent
     : candidate.sharePageContent === 'ask' ? 'ask' : 'auto'
-  return { ...candidate, sharePageContent, trustedActionOrigins: trusted }
+  const navigationTarget = candidate.navigationTarget === 'new-tab' || candidate.navigationTarget === 'new-window'
+    ? candidate.navigationTarget
+    : 'current'
+  return { ...candidate, sharePageContent, navigationTarget, trustedActionOrigins: trusted }
 }
 
 function isCanonicalWebOrigin(value: unknown): value is string {
@@ -256,6 +262,7 @@ function routeToolCall(call: ToolCall): void {
     budget,
     (prompt) => authorizeToolCall(prompt, controller.signal),
     controller.signal,
+    settings.navigationTarget,
   ).then(
     (answer) => {
       if (controller.signal.aborted) return

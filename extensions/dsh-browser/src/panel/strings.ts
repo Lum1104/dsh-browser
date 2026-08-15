@@ -41,6 +41,11 @@ export interface PanelCopy {
     sharingAuto: string
     sharingAsk: string
     sharingOff: string
+    navigationTarget: string
+    navigationTargetHelp: string
+    navigationCurrent: string
+    navigationNewTab: string
+    navigationNewWindow: string
     trustedOrigins: string
     trustedOriginsHelp: string
     trustedOriginInput: string
@@ -134,6 +139,11 @@ const EN: PanelCopy = {
     sharingAuto: 'Share automatically (default)',
     sharingAsk: 'Ask every time',
     sharingOff: 'Off',
+    navigationTarget: 'Where to open pages',
+    navigationTargetHelp: 'Controls where browser_navigate opens links',
+    navigationCurrent: 'Current tab (default)',
+    navigationNewTab: 'New tab',
+    navigationNewWindow: 'New window',
     trustedOrigins: 'Always-allowed domains',
     trustedOriginsHelp: 'The approval dialog can trust a domain for the current side-panel session only. Domains added here permanently skip action confirmation; explicit cross-origin navigation will still ask.',
     trustedOriginInput: 'Domain to always trust',
@@ -227,6 +237,11 @@ const ZH: PanelCopy = {
     sharingAuto: '自动共享（默认）',
     sharingAsk: '每次询问',
     sharingOff: '关闭',
+    navigationTarget: '打开页面的方式',
+    navigationTargetHelp: '控制 browser_navigate 在何处打开链接',
+    navigationCurrent: '当前标签页（默认）',
+    navigationNewTab: '新标签页',
+    navigationNewWindow: '新窗口',
     trustedOrigins: '永久免确认域名',
     trustedOriginsHelp: '审批框可只信任本次侧栏会话。这里添加的域名会长期免除操作确认；显式跨域导航仍会询问。',
     trustedOriginInput: '要永久信任的域名',

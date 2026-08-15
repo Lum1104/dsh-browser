@@ -205,6 +205,7 @@ export function App(): React.JSX.Element {
         bridgeUrl: raw?.bridgeUrl ?? '',
         token: raw?.token ?? '',
         sharePageContent: raw?.sharePageContent ?? 'auto',
+        navigationTarget: raw?.navigationTarget ?? 'current',
         trustedActionOrigins: raw?.trustedActionOrigins ?? [],
       })
     })
@@ -430,6 +431,18 @@ export function App(): React.JSX.Element {
               <option value="auto">{copy.settings.sharingAuto}</option>
               <option value="ask">{copy.settings.sharingAsk}</option>
               <option value="off">{copy.settings.sharingOff}</option>
+            </select>
+          </label>
+          <label>
+            <span>{copy.settings.navigationTarget}</span>
+            <small>{copy.settings.navigationTargetHelp}</small>
+            <select
+              value={settings?.navigationTarget ?? 'current'}
+              onChange={(e) => setSettings((prev) => prev === null ? prev : { ...prev, navigationTarget: e.target.value as PanelSettings['navigationTarget'] })}
+            >
+              <option value="current">{copy.settings.navigationCurrent}</option>
+              <option value="new-tab">{copy.settings.navigationNewTab}</option>
+              <option value="new-window">{copy.settings.navigationNewWindow}</option>
             </select>
           </label>
         </div>
