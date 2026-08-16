@@ -180,8 +180,20 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     ctx.effect(() => systemPrompt.section({
       name: 'tool:bridge-browser',
       order: 107,
-      text: 'A browser bridge may be connected. To read or operate the user\'s active browser page, call browser_snapshot '
-        + '(text-only; numbered items are the click/type targets). Never assume page content you have not snapshot.',
+      text: 'A browser bridge may be connected and provides browser_* tools that drive the user\'s real browser tab '
+        + '(preserving login state, cookies and sessions). They are RESTRICTED tools: use them only when one of these '
+        + 'holds — (1) the page needs login state, cookies, or a real browser session; (2) the page is JS-rendered or '
+        + 'dynamic and lightweight tools cannot read its full content; (3) the task requires interaction: clicking, '
+        + 'typing, pressing keys, scrolling, in-page navigation, or extracting text from a specific region; '
+        + '(4) the user explicitly asks to open or operate the browser. '
+        + 'For any other information gathering — searching, looking things up, reading summaries, and the like — '
+        + 'prefer lightweight tools such as web_search, and judge for yourself which tasks do not need the browser: '
+        + 'browser_* is much slower and far more token-expensive than lightweight search, so do not open the browser '
+        + 'for every query. '
+        + 'For research/search tasks, collect candidates with lightweight search first (summaries + links), then open '
+        + 'with browser_navigate only the pages you actually need to read in depth, and snapshot narrowly '
+        + '(region for the content area, delta=true for changes). Never open a browser page just to confirm what a '
+        + 'snippet already tells you. Never assume page content you have not snapshot.',
     }), 'bridge-browser: system prompt section')
   }
 

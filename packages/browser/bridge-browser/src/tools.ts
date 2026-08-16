@@ -115,6 +115,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
   const snapshot = (): ToolDefinition => ({
     name: 'browser_snapshot',
     description: '读取当前浏览器页面及可访问 iframe 的结构化文本快照（无截图）：标题、URL、正文摘要、带编号的可交互元素清单、表单字段。'
+      + '仅在需要真实浏览器渲染（JS 动态内容）、登录态页面，或要发起交互操作时才使用本工具；普通信息查询应先用 web_search 等轻量方式，不要为每条查询都打开浏览器。'
       + `顶层元素只需 index；iframe 元素使用快照标题中的 frame 与局部稳定 index。页面未变化时设置 delta=true 只返回变化部分，节省上下文。${UNTRUSTED_CONTENT_WARNING}`,
     parameters: {
       ...OBJECT_SCHEMA,
@@ -205,7 +206,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const navigate = (): ToolDefinition => ({
     name: 'browser_navigate',
-    description: '在当前标签页导航到指定 URL。保留当前登录状态（cookie/会话）。',
+    description: '在当前标签页导航到指定 URL。保留当前登录状态（cookie/会话）。仅在需要浏览器环境（登录态、JS 渲染）或用户明确要求打开页面时才用；普通信息查询请先用 web_search 等轻量方式。',
     parameters: {
       ...OBJECT_SCHEMA,
       url: { type: 'string', required: true, description: '完整 URL（http/https）。' },
