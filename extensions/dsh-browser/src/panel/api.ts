@@ -37,6 +37,11 @@ interface StatusMessage {
   caps: BridgeCaps | null
 }
 
+interface ResumeHintMessage {
+  type: 'resume-hint'
+  sessionId: string | null
+}
+
 interface EventMessage {
   type: 'event'
   frame: ServerFrame
@@ -52,13 +57,14 @@ interface ApprovalResolvedMessage {
   id: string
 }
 
-type BackgroundMessage = RpcResultMessage | RespondResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage
+type BackgroundMessage = RpcResultMessage | RespondResultMessage | StatusMessage | ResumeHintMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage
 
 /** The panel API surface. */
 export interface PanelApi {
   rpc<T = unknown>(method: string, payload?: unknown): Promise<T>
   respond(rpcId: string, result: RespondResult): Promise<unknown>
   onStatus(callback: (state: BridgeState, caps: BridgeCaps | null) => void): () => void
+  onResumeHint(callback: (sessionId: string | null) => void): () => void
   onEvent(callback: (frame: ServerFrame) => void): () => void
   onApprovalRequest(callback: (request: ApprovalRequest) => void): () => void
   onApprovalResolved(callback: (id: string) => void): () => void
@@ -77,6 +83,7 @@ export function connectPanel(): PanelApi {
     timer: ReturnType<typeof setTimeout>
   }>()
   const statusListeners = new Set<(state: BridgeState, caps: BridgeCaps | null) => void>()
+  const resumeHintListeners = new Set<(sessionId: string | null) => void>()
   const eventListeners = new Set<(frame: ServerFrame) => void>()
   const approvalListeners = new Set<(request: ApprovalRequest) => void>()
   const approvalResolvedListeners = new Set<(id: string) => void>()
@@ -111,6 +118,9 @@ export function connectPanel(): PanelApi {
       }
       case 'status':
         for (const listener of statusListeners) listener(msg.state, msg.caps)
+        break
+      case 'resume-hint':
+        for (const listener of resumeHintListeners) listener(msg.sessionId)
         break
       case 'event':
         for (const listener of eventListeners) listener(msg.frame)
@@ -157,6 +167,10 @@ export function connectPanel(): PanelApi {
     onStatus(callback) {
       statusListeners.add(callback)
       return () => { statusListeners.delete(callback) }
+    },
+    onResumeHint(callback) {
+      resumeHintListeners.add(callback)
+      return () => { resumeHintListeners.delete(callback) }
     },
     onEvent(callback) {
       eventListeners.add(callback)

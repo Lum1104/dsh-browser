@@ -48,6 +48,10 @@ export interface Settings {
   sharePageContent: 'ask' | 'auto' | 'off'
   /** Origins whose state-changing actions may run without another prompt. */
   trustedActionOrigins: string[]
+  /** Auto-open the side panel when a browser action needs approval while it is closed. */
+  autoOpenSidePanel: boolean
+  /** Auto-resume the most recent session when the panel connects. */
+  autoResumeSession: boolean
 }
 
 const SETTINGS_DEFAULTS: Settings = {
@@ -56,6 +60,8 @@ const SETTINGS_DEFAULTS: Settings = {
   token: '',
   sharePageContent: 'auto',
   trustedActionOrigins: [],
+  autoOpenSidePanel: true,
+  autoResumeSession: true,
 }
 
 /** 自动探测的候选端口（dsh web 默认 3080；--port 覆盖的常见值）。 */
@@ -103,6 +109,8 @@ let settings: Settings = { ...SETTINGS_DEFAULTS }
 let caps: BridgeCaps | null = null
 let bridge: BridgeClient | null = null
 let rpc: ReturnType<typeof createRpc> | null = null
+/** Most recently observed session id from the event stream (the session that triggered the last browser action). */
+let lastActiveSessionId: string | null = null
 const panelPorts = new Set<chrome.runtime.Port>()
 const interactionResponses = new InteractionResponseRouter()
 const transientEvents = new TransientEventCache()
@@ -114,7 +122,7 @@ const pendingApprovals = new Map<string, {
   resolve: (decision: ApprovalDecision) => void
   timer: ReturnType<typeof setTimeout>
 }>()
-const APPROVAL_TIMEOUT_MS = 30_000
+const APPROVAL_TIMEOUT_MS = 60_000
 
 async function loadSettings(): Promise<Settings> {
   const stored = await chrome.storage.local.get(STORAGE_KEY)
@@ -138,7 +146,13 @@ function normalizeSettings(candidate: Settings): Settings {
   const sharePageContent = candidate.sharePageContent === 'auto' || candidate.sharePageContent === 'off'
     ? candidate.sharePageContent
     : candidate.sharePageContent === 'ask' ? 'ask' : 'auto'
-  return { ...candidate, sharePageContent, trustedActionOrigins: trusted }
+  return {
+    ...candidate,
+    sharePageContent,
+    trustedActionOrigins: trusted,
+    autoOpenSidePanel: candidate.autoOpenSidePanel !== false,
+    autoResumeSession: candidate.autoResumeSession !== false,
+  }
 }
 
 function broadcastStatus(): void {
@@ -185,8 +199,30 @@ function settleApproval(id: string, decision: ApprovalDecision): void {
   broadcastApprovalResolved(id)
 }
 
+/** Auto-open the side panel (setting-gated). Falls back to a notification when the browser rejects the call. */
+async function ensureSidePanelOpen(): Promise<void> {
+  if (settings.autoOpenSidePanel !== true) return
+  const zh = getUiLocale() === 'zh'
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
+    const windowId = tab?.windowId ?? (await chrome.windows.getLastFocused()).id
+    if (windowId !== undefined) await chrome.sidePanel.open({ windowId })
+  } catch {
+    try {
+      await chrome.notifications.create('dsh-browser-approval', {
+        type: 'basic',
+        iconUrl: chrome.runtime.getURL('assets/icons/icon128.png'),
+        title: zh ? 'dsh 浏览器助手' : 'dsh Browser Assistant',
+        message: zh
+          ? '侧边栏有浏览器操作待审批，请点击工具栏鲸鱼图标打开侧边栏（审批会等待 60 秒）。'
+          : 'A browser action is waiting for approval. Click the whale icon in the toolbar to open the side panel (the request waits 60s).',
+      })
+    } catch { /* notifications unavailable */ }
+  }
+}
+
 function requestApproval(prompt: ApprovalPrompt, signal: AbortSignal): Promise<ApprovalDecision> {
-  if (panelPorts.size === 0 || signal.aborted) return Promise.resolve('deny')
+  if (signal.aborted) return Promise.resolve('deny')
   const request: ApprovalRequest = { ...prompt, id: crypto.randomUUID() }
   return new Promise((resolve) => {
     const onAbort = (): void => { settleApproval(request.id, 'deny') }
@@ -202,14 +238,29 @@ function requestApproval(prompt: ApprovalPrompt, signal: AbortSignal): Promise<A
       settleApproval(request.id, 'deny')
       return
     }
+    // 侧边栏未打开时不再立即拒绝：自动弹出（受设置开关控制），并在超时窗口内
+    // 轮询等待面板端口出现后再送达审批；超时仍 fail-closed 拒绝。
+    if (panelPorts.size === 0) void ensureSidePanelOpen()
     let delivered = false
-    for (const port of panelPorts) {
-      try {
-        port.postMessage({ type: 'approval.request', request })
-        delivered = true
-      } catch { /* port already closed */ }
+    let poll: ReturnType<typeof setInterval> | undefined
+    const tryDeliver = (): void => {
+      if (delivered) return
+      if (pendingApprovals.get(request.id) === undefined) {
+        // 已被 settle（超时/abort）：停止轮询。
+        if (poll !== undefined) clearInterval(poll)
+        return
+      }
+      for (const port of panelPorts) {
+        try {
+          port.postMessage({ type: 'approval.request', request })
+          delivered = true
+          if (poll !== undefined) clearInterval(poll)
+          return
+        } catch { /* port already closed */ }
+      }
     }
-    if (!delivered) settleApproval(request.id, 'deny')
+    tryDeliver()
+    if (!delivered) poll = setInterval(tryDeliver, 500)
   })
 }
 
@@ -345,6 +396,8 @@ async function startBridge(): Promise<void> {
         if (frame.t === 'event') {
           transientEvents.ingest(frame)
           broadcastEvent(frame)
+          const payload = frame.frame.payload as { sessionId?: string } | undefined
+          if (typeof payload?.sessionId === 'string') lastActiveSessionId = payload.sessionId
         }
         else if (frame.t === 'tool.call') routeToolCall(frame)
         else if (frame.t === 'tool.cancel') cancelToolCall(frame.id)
@@ -380,6 +433,9 @@ chrome.runtime.onConnect.addListener((port) => {
   panelPorts.add(port)
   if (bridge === null) void startBridge()
   try { port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps }) } catch { /* port closed */ }
+  try {
+    port.postMessage({ type: 'resume-hint', sessionId: lastActiveSessionId })
+  } catch { /* port closed */ }
   port.onMessage.addListener((message: unknown) => {
     if (typeof message !== 'object' || message === null) return
     const msg = message as { type?: string }

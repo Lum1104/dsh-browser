@@ -206,6 +206,7 @@ export function App(): React.JSX.Element {
   const [stopping, setStopping] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [approvalQueue, setApprovalQueue] = useState<ApprovalRequest[]>([])
+  const [pendingApprovals, setPendingApprovals] = useState<ApprovalRequest[]>([])
   const [trustedOriginInput, setTrustedOriginInput] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [showSessionPicker, setShowSessionPicker] = useState(false)
@@ -223,6 +224,7 @@ export function App(): React.JSX.Element {
   const sessionRuntimeRef = useRef(new SessionRuntimeCache())
   const seqRef = useRef(0)
   const sessionRef = useRef<string | null>(null)
+  const resumeHintRef = useRef<string | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
 
   const nextSeq = (): number => { seqRef.current += 1; return seqRef.current }
@@ -273,6 +275,8 @@ export function App(): React.JSX.Element {
         token: raw?.token ?? '',
         sharePageContent: raw?.sharePageContent ?? 'auto',
         trustedActionOrigins: raw?.trustedActionOrigins ?? [],
+        autoOpenSidePanel: raw?.autoOpenSidePanel ?? true,
+        autoResumeSession: raw?.autoResumeSession ?? true,
       })
     })
   }, [])
@@ -305,21 +309,45 @@ export function App(): React.JSX.Element {
       }
     })
     const offEvent = api.onEvent((frame) => { void onFrame(frame) })
+    const offResumeHint = api.onResumeHint((sessionId) => { resumeHintRef.current = sessionId })
     const offApproval = api.onApprovalRequest((request) => {
+      if (sessionChangingRef.current) {
+        setPendingApprovals((current) => current.some((entry) => entry.id === request.id) ? current : [...current, request])
+        return
+      }
       setApprovalQueue((current) => current.some((entry) => entry.id === request.id) ? current : [...current, request])
     })
     const offApprovalResolved = api.onApprovalResolved((id) => {
       setApprovalQueue((current) => current.filter((request) => request.id !== id))
+      setPendingApprovals((current) => current.filter((request) => request.id !== id))
     })
     api.requestStatus()
-    return () => { offStatus(); offEvent(); offApproval(); offApprovalResolved() }
+    return () => { offStatus(); offEvent(); offResumeHint(); offApproval(); offApprovalResolved() }
   }, [api])
+
+  // 会话切换完成后，把等待中的审批请求并入显示队列。
+  useEffect(() => {
+    if (sessionChanging) return
+    if (pendingApprovals.length === 0) return
+    setApprovalQueue((current) => {
+      const merged = [...current]
+      for (const request of pendingApprovals) {
+        if (!merged.some((entry) => entry.id === request.id)) merged.push(request)
+      }
+      return merged
+    })
+    setPendingApprovals([])
+  }, [sessionChanging, pendingApprovals])
 
   useEffect(() => {
     if (state === 'connected' && sessionRef.current === null) {
-      void ensureSession()
+      if (settings?.autoResumeSession !== false) {
+        void resumeMostRecentSession()
+      } else {
+        void ensureSession()
+      }
     }
-  }, [state, sessionEpoch])
+  }, [state, sessionEpoch, settings?.autoResumeSession])
 
   // Auto-scroll to the newest row.
   useEffect(() => {
@@ -454,6 +482,27 @@ export function App(): React.JSX.Element {
     } catch (cause) {
       if (sessionRef.current === id) setError(cause instanceof Error ? cause.message : String(cause))
     }
+  }
+
+  /** 连接后优先续接当前会话：resume-hint 指定 → 最近非空白会话 → 新建。 */
+  async function resumeMostRecentSession(): Promise<void> {
+    const hinted = resumeHintRef.current
+    try {
+      const result = await api.rpc<{ items: SessionPickerEntry[] }>('session.list', {})
+      for (const entry of result.items ?? []) {
+        sessionRuntimeRef.current.seedRunning(entry.sessionId, entry.running)
+      }
+      const items = resumableSessions(result.items ?? [])
+      const target = (hinted !== null ? items.find((entry) => entry.sessionId === hinted) : undefined)
+        ?? items[0]
+      if (target !== undefined && !sessionChangingRef.current) {
+        await resumeSession(target)
+        return
+      }
+    } catch {
+      // 列表不可用时回退到新建会话。
+    }
+    await ensureSession()
   }
 
   /** 每次打开侧边栏都新建一个会话（与 GUI/其他界面的历史完全隔离）。 */
@@ -679,6 +728,26 @@ export function App(): React.JSX.Element {
               <option value="ask">{copy.settings.sharingAsk}</option>
               <option value="off">{copy.settings.sharingOff}</option>
             </select>
+          </label>
+          <label>
+            <span>{copy.settings.autoOpenSidePanel}</span>
+            <small>{copy.settings.autoOpenSidePanelHelp}</small>
+            <input
+              type="checkbox"
+              className="local-toggle"
+              checked={settings?.autoOpenSidePanel ?? true}
+              onChange={(e) => setSettings((prev) => prev === null ? prev : { ...prev, autoOpenSidePanel: e.target.checked })}
+            />
+          </label>
+          <label>
+            <span>{copy.settings.autoResumeSession}</span>
+            <small>{copy.settings.autoResumeSessionHelp}</small>
+            <input
+              type="checkbox"
+              className="local-toggle"
+              checked={settings?.autoResumeSession ?? true}
+              onChange={(e) => setSettings((prev) => prev === null ? prev : { ...prev, autoResumeSession: e.target.checked })}
+            />
           </label>
         </div>
         <section className="trusted-origins" aria-labelledby="trusted-origins-title">

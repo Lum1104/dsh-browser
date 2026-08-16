@@ -12,7 +12,8 @@
     "activeTab",
     "scripting",
     "webNavigation",
-    "alarms"
+    "alarms",
+    "notifications"
   ],
   "host_permissions": [
     "http://*/*",

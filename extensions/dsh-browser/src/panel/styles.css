@@ -1,4 +1,4 @@
-:root {
+﻿:root {
   color-scheme: light;
   --canvas: #f4f6fa;
   --canvas-deep: #edf0f6;
@@ -1709,4 +1709,22 @@ textarea:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Checkbox rows in settings (browser approval notifications / resume session) */
+.settings input.local-toggle {
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  grid-column: 2;
+  grid-row: 1 / 3;
+  justify-self: end;
+  align-self: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  accent-color: var(--blue);
+  cursor: pointer;
 }
