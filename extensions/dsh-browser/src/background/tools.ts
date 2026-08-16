@@ -242,7 +242,13 @@ export async function dispatchToolCall(
     const allowed = authorize === undefined ? false : await authorize(approval)
     if (isCancelled(call, signal)) return cancelled()
     if (!allowed) {
-      return { ok: false, error: { code: 'action-failed', message: '用户未批准读取或页面操作' } }
+      return {
+        ok: false,
+        error: {
+          code: 'action-failed',
+          message: '用户未批准或审批等待超时（侧边栏可能未打开）。浏览器操作需要用户在侧边栏确认；请提醒用户打开侧边栏完成审批，或询问用户是否继续此操作后再重试。工具本身工作正常。',
+        },
+      }
     }
   }
   let executionFrames = frames
