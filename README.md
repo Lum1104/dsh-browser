@@ -132,9 +132,6 @@ pnpm --filter dsh-browser-extension run build:opera
 
 Then open `opera://extensions`, enable **Developer mode**, choose **Load unpacked**, and select `extensions/dsh-browser/dist-opera/`. The panel docks as its own icon in Opera's left sidebar.
 
-> [!NOTE]
-> The Opera build has not been verified on Opera itself yet; see [#34](https://github.com/Lum1104/dsh-browser/issues/34).
-
 ### Start and use
 
 Start the managed installation with:

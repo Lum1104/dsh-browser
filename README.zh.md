@@ -132,9 +132,6 @@ pnpm --filter dsh-browser-extension run build:opera
 
 然后打开 `opera://extensions`，开启**开发者模式**，选择**加载已解压的扩展程序**，选取 `extensions/dsh-browser/dist-opera/`。面板会作为独立图标停靠在 Opera 左侧栏。
 
-> [!NOTE]
-> Opera 构建尚未在 Opera 上实测，见 [#34](https://github.com/Lum1104/dsh-browser/issues/34)。
-
 ### 启动与使用
 
 启动托管安装：
