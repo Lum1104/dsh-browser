@@ -41,10 +41,15 @@ function tab(tabId: number): chrome.tabs.Tab {
   }
 }
 
-function mockChrome() {
+function mockChrome(options: { sidePanel?: boolean } = {}) {
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
   const onFocusChanged = chromeEvent<[number]>()
+  const onActivated = chromeEvent<[{ tabId: number; windowId: number }]>()
+  const onActionClicked = chromeEvent<[chrome.tabs.Tab]>()
   const query = vi.fn(async () => [tab(1)])
+  // Browsers with no Side Panel API host the panel in a window of its own.
+  let resolveCreate: (value: { id: number }) => void = () => {}
+  const createWindow = vi.fn(() => new Promise<{ id: number }>((resolve) => { resolveCreate = resolve }))
   vi.stubGlobal('chrome', {
     alarms: {
       create: vi.fn(),
@@ -52,7 +57,7 @@ function mockChrome() {
       onAlarm: chromeEvent<[chrome.alarms.Alarm]>(),
     },
     action: {
-      onClicked: chromeEvent<[chrome.tabs.Tab]>(),
+      onClicked: onActionClicked,
     },
     notifications: {
       create: vi.fn(async () => ''),
@@ -63,10 +68,12 @@ function mockChrome() {
       getURL: (path: string) => `chrome-extension://test/${path}`,
       onConnect,
     },
-    sidePanel: {
-      open: vi.fn(async () => {}),
-      setPanelBehavior: vi.fn(async () => {}),
-    },
+    ...(options.sidePanel === false ? {} : {
+      sidePanel: {
+        open: vi.fn(async () => {}),
+        setPanelBehavior: vi.fn(async () => {}),
+      },
+    }),
     storage: {
       local: {
         get: vi.fn(async () => ({})),
@@ -82,7 +89,7 @@ function mockChrome() {
       get: vi.fn(async (tabId: number) => tab(tabId)),
       query,
       sendMessage: vi.fn(async () => {}),
-      onActivated: chromeEvent<[{ tabId: number; windowId: number }]>(),
+      onActivated,
       onUpdated: chromeEvent<[number, chrome.tabs.TabChangeInfo, chrome.tabs.Tab]>(),
       onReplaced: chromeEvent<[number, number]>(),
       onRemoved: chromeEvent<[number]>(),
@@ -91,9 +98,19 @@ function mockChrome() {
       WINDOW_ID_NONE: -1,
       onFocusChanged,
       onRemoved: chromeEvent<[number]>(),
+      create: createWindow,
+      update: vi.fn(async () => ({})),
     },
   } as unknown as typeof chrome)
-  return { onConnect, onFocusChanged, query }
+  return {
+    createWindow,
+    onActionClicked,
+    onActivated,
+    onConnect,
+    onFocusChanged,
+    query,
+    resolveCreate: (id: number) => { resolveCreate({ id }) },
+  }
 }
 
 async function connectPanelForTest() {
@@ -229,6 +246,50 @@ describe('background tab-affinity rebind protocol', () => {
 
     onMessage.emit({ type: 'request-status' })
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'tab-affinity',
+      state: expect.objectContaining({
+        status: 'following',
+        controlled: expect.objectContaining({ tabId: 1 }),
+      }),
+    }))
+  })
+
+  it('ignores the popup activation that arrives before windows.create resolves', async () => {
+    // The browser focuses and activates the new panel window before create()
+    // resolves, so its id is still unknown. Marking it focused there would let
+    // tabs.onActivated mark a switch — it has no URL yet to reject — handing
+    // control to the extension page and cancelling pending approvals.
+    const chromeMock = mockChrome({ sidePanel: false })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 503 })))
+    await import('../src/background/index.ts')
+    await vi.waitFor(() => { expect(chromeMock.query).toHaveBeenCalled() })
+
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    await vi.waitFor(() => {
+      expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity' }))
+    })
+    panel.onMessage.emit({ type: 'tab-affinity.rebind', id: 'initial-bind' })
+    await vi.waitFor(() => {
+      expect(panel.postMessage).toHaveBeenCalledWith({
+        type: 'tab-affinity.rebind.result', id: 'initial-bind', ok: true,
+      })
+    })
+    panel.postMessage.mockClear()
+
+    // Toolbar click opens the fallback window; create() stays pending.
+    chromeMock.onActionClicked.emit(tab(1))
+    await vi.waitFor(() => { expect(chromeMock.createWindow).toHaveBeenCalled() })
+
+    // The popup takes focus and activates its own tab, both before create()
+    // resolves and therefore before the window has an id to be matched by.
+    chromeMock.onFocusChanged.emit(9)
+    chromeMock.onActivated.emit({ tabId: 99, windowId: 9 })
+    chromeMock.resolveCreate(9)
+    await vi.waitFor(() => { expect(chromeMock.createWindow).toHaveBeenCalledOnce() })
+
+    panel.onMessage.emit({ type: 'request-status' })
+    expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({
       type: 'tab-affinity',
       state: expect.objectContaining({
         status: 'following',

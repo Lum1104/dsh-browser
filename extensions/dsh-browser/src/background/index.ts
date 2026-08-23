@@ -64,6 +64,7 @@ import {
   isPanelDocument,
   isPanelWindow,
   openAssistantPanel,
+  panelWindowSettled,
   preferPanelOnActionClick,
 } from './panel-host.ts'
 import { ApprovalCoordinator, type ApprovalRequestResult } from './approval-coordinator.ts'
@@ -1017,6 +1018,9 @@ chrome.notifications.onClicked.addListener((notificationId) => {
 // ---- Tab affinity ----
 
 chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  // The panel window's own tab is never a page to control. acceptActivation
+  // already rejects it while the tracker points elsewhere; this states it.
+  if (isPanelWindow(windowId)) return
   void affinityReady.then(() => {
     const activationRevision = focusedWindow.acceptActivation(windowId)
     if (activationRevision === null) return
@@ -1072,13 +1076,24 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   })
 })
 
-chrome.windows.onFocusChanged.addListener((windowId) => {
-  if (windowId === chrome.windows.WINDOW_ID_NONE) return
-  // Focusing the panel's own window is not a tab switch; treating it as one
-  // would hand control to chrome-extension:// or fake a handoff on the session.
+function trackFocusedWindow(windowId: number): void {
+  // Marking the panel's own window focused is what would let its activation
+  // through: tabs.onActivated marks a switch before it has any URL to reject,
+  // so the guard has to be here, where the window is still identifiable.
   if (isPanelWindow(windowId)) return
   focusedWindow.markFocused(windowId)
   void affinityReady.then(() => syncActiveTab(windowId))
+}
+
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return
+  // The browser focuses a new panel window before windows.create resolves, so
+  // mid-open this window has no id to compare against yet. Wait for it.
+  if (hasPanelWindow() && !isPanelWindow(windowId)) {
+    void panelWindowSettled().then(() => { trackFocusedWindow(windowId) })
+    return
+  }
+  trackFocusedWindow(windowId)
 })
 
 // ---- Keepalive ----

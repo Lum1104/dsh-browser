@@ -108,6 +108,16 @@ export function hasPanelWindow(): boolean {
   return panelWindowOpening !== null || panelWindowId !== undefined
 }
 
+/**
+ * Resolves once any in-flight open has settled, at which point
+ * {@link isPanelWindow} can answer for the window it created. The browser
+ * focuses that window before `windows.create` resolves, so a focus event
+ * arriving mid-open cannot be judged until this settles.
+ */
+export function panelWindowSettled(): Promise<void> {
+  return panelWindowOpening ?? Promise.resolve()
+}
+
 /** Whether a window is the panel's own popup rather than a browser window. */
 export function isPanelWindow(windowId: number): boolean {
   return panelWindowId !== undefined && panelWindowId === windowId
