@@ -32,6 +32,8 @@ export type PanelHost = 'side-panel' | 'sidebar-action' | 'window'
 
 /** The remembered fallback window, so a second click focuses it rather than stacking a duplicate. */
 let panelWindowId: number | undefined
+/** Set before `windows.create` resolves, because the browser focuses the new window first. */
+let panelWindowPending = false
 
 function sidePanelApi(): SidePanelApi | undefined {
   const api = (chrome as { sidePanel?: SidePanelApi }).sidePanel
@@ -77,13 +79,43 @@ async function openPanelWindow(): Promise<void> {
     // The user closed it; fall through and open a replacement.
     panelWindowId = undefined
   }
-  const created = await chrome.windows.create({
-    url: chrome.runtime.getURL('panel/index.html'),
-    type: 'popup',
-    width: PANEL_WINDOW_WIDTH,
-    height: PANEL_WINDOW_HEIGHT,
-  }).catch(() => undefined)
-  panelWindowId = created?.id
+  panelWindowPending = true
+  try {
+    const created = await chrome.windows.create({
+      url: chrome.runtime.getURL('panel/index.html'),
+      type: 'popup',
+      width: PANEL_WINDOW_WIDTH,
+      height: PANEL_WINDOW_HEIGHT,
+    }).catch(() => undefined)
+    panelWindowId = created?.id
+  } finally {
+    panelWindowPending = false
+  }
+}
+
+/**
+ * Whether this browser hosts the panel in a window of its own. Only then can
+ * Chrome's last-focused window be the panel rather than a page, so callers use
+ * this to keep tab affinity pointed at the user's browser window.
+ */
+export function hasPanelWindow(): boolean {
+  return panelWindowPending || panelWindowId !== undefined
+}
+
+/** Whether a window is the panel's own popup rather than a browser window. */
+export function isPanelWindow(windowId: number): boolean {
+  return panelWindowId !== undefined && panelWindowId === windowId
+}
+
+/**
+ * Whether a tab is showing the panel itself. Content scripts never match
+ * `chrome-extension://`, so binding browser tools to this document would break
+ * every one of them; the URL is authoritative where a window id can still race
+ * the `windows.create` that produced it.
+ */
+export function isPanelDocument(url: string | undefined): boolean {
+  if (url === undefined || url === '') return false
+  return url.startsWith(chrome.runtime.getURL('panel/'))
 }
 
 /**

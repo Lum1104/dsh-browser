@@ -58,7 +58,14 @@ import {
   type TabAffinityDecision,
 } from './tab-affinity.ts'
 import { FocusedWindowTracker } from './focused-window.ts'
-import { forgetPanelWindow, openAssistantPanel, preferPanelOnActionClick } from './panel-host.ts'
+import {
+  forgetPanelWindow,
+  hasPanelWindow,
+  isPanelDocument,
+  isPanelWindow,
+  openAssistantPanel,
+  preferPanelOnActionClick,
+} from './panel-host.ts'
 import { ApprovalCoordinator, type ApprovalRequestResult } from './approval-coordinator.ts'
 import {
   RECENT_SESSION_STORAGE_KEY,
@@ -393,18 +400,34 @@ function observeActiveTab(tab: chrome.tabs.Tab): void {
   if (summary !== null) observeActiveSummary(summary)
 }
 
+/**
+ * The last window that held a real page. Only consulted where the panel lives
+ * in a window of its own: there Chrome's last-focused window is the panel
+ * itself while the user types in it, which must never become the tool target.
+ */
+let lastBrowserWindowId: number | undefined
+
+function activeTabQuery(windowId?: number): chrome.tabs.QueryInfo {
+  if (windowId !== undefined) return { active: true, windowId }
+  if (hasPanelWindow() && lastBrowserWindowId !== undefined) {
+    return { active: true, windowId: lastBrowserWindowId }
+  }
+  return { active: true, lastFocusedWindow: true }
+}
+
 async function syncActiveTab(windowId?: number, signal?: AbortSignal): Promise<chrome.tabs.Tab | undefined> {
   const queryRevision = focusedWindow.beginQuery()
-  const query = windowId === undefined
-    ? { active: true, lastFocusedWindow: true }
-    : { active: true, windowId }
+  const query = activeTabQuery(windowId)
   try {
     const tabs = chrome.tabs.query(query)
     const [tab] = signal === undefined ? await tabs : await abortable(tabs, signal)
     if (signal !== undefined) throwIfRebindAborted(signal)
     if (tab === undefined) return undefined
+    // Fail closed rather than bind browser tools to the panel's own document.
+    if (isPanelDocument(tab.url)) return undefined
     if (!focusedWindow.commitQuery(tab.windowId, queryRevision)) return undefined
     if (signal !== undefined) throwIfRebindAborted(signal)
+    lastBrowserWindowId = tab.windowId
     observeActiveTab(tab)
     return tab
   } catch {
@@ -1051,6 +1074,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.windows.onFocusChanged.addListener((windowId) => {
   if (windowId === chrome.windows.WINDOW_ID_NONE) return
+  // Focusing the panel's own window is not a tab switch; treating it as one
+  // would hand control to chrome-extension:// or fake a handoff on the session.
+  if (isPanelWindow(windowId)) return
   focusedWindow.markFocused(windowId)
   void affinityReady.then(() => syncActiveTab(windowId))
 })
@@ -1077,7 +1103,11 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // itself; Firefox and Opera deliver action.onClicked instead, so the listener is
 // registered for every build and openAssistantPanel picks the host at runtime.
 preferPanelOnActionClick()
-chrome.action.onClicked.addListener((tab) => { void openAssistantPanel(tab.windowId) })
+chrome.action.onClicked.addListener((tab) => {
+  // Record the window the click came from before any panel window can steal focus.
+  if (tab.windowId !== undefined) lastBrowserWindowId = tab.windowId
+  void openAssistantPanel(tab.windowId)
+})
 chrome.windows.onRemoved.addListener((windowId) => { forgetPanelWindow(windowId) })
 
 // Alarms survive some extension/service-worker restarts. Remove any stale

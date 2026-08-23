@@ -116,6 +116,54 @@ describe('panel host selection', () => {
     expect(chromeStub.windows.create).toHaveBeenCalledTimes(2)
   })
 
+  it('identifies its own window and document so tab affinity can skip them', async () => {
+    stubChrome()
+    const { openAssistantPanel, hasPanelWindow, isPanelWindow, isPanelDocument } = await loadPanelHost()
+
+    expect(hasPanelWindow()).toBe(false)
+    expect(isPanelWindow(7)).toBe(false)
+
+    await openAssistantPanel()
+
+    expect(hasPanelWindow()).toBe(true)
+    expect(isPanelWindow(7)).toBe(true)
+    expect(isPanelWindow(8)).toBe(false)
+    expect(isPanelDocument('chrome-extension://test-id/panel/index.html')).toBe(true)
+    expect(isPanelDocument('chrome-extension://test-id/panel/index.html#settings')).toBe(true)
+    expect(isPanelDocument('https://example.com/')).toBe(false)
+    expect(isPanelDocument(undefined)).toBe(false)
+    expect(isPanelDocument('')).toBe(false)
+  })
+
+  it('claims the panel window before windows.create resolves', async () => {
+    // The browser focuses the new window before create() resolves, so a
+    // window-id check alone would miss the very first focus event.
+    let resolveCreate: (value: { id: number }) => void = () => {}
+    stubChrome({
+      windows: {
+        create: vi.fn(() => new Promise<{ id: number }>((resolve) => { resolveCreate = resolve })),
+        update: vi.fn(async () => ({})),
+      },
+    })
+    const { openAssistantPanel, hasPanelWindow } = await loadPanelHost()
+
+    const opening = openAssistantPanel()
+    expect(hasPanelWindow()).toBe(true)
+
+    resolveCreate({ id: 7 })
+    await opening
+    expect(hasPanelWindow()).toBe(true)
+  })
+
+  it('reports no panel window on browsers that never open one', async () => {
+    stubChrome({ sidePanel: { open: vi.fn(async () => {}) } })
+    const { openAssistantPanel, hasPanelWindow, isPanelWindow } = await loadPanelHost()
+
+    await openAssistantPanel(1)
+    expect(hasPanelWindow()).toBe(false)
+    expect(isPanelWindow(1)).toBe(false)
+  })
+
   it('forgets a closed window so the next open does not probe a dead id', async () => {
     const chromeStub = stubChrome()
     const { openAssistantPanel, forgetPanelWindow } = await loadPanelHost()
@@ -126,6 +174,17 @@ describe('panel host selection', () => {
 
     expect(chromeStub.windows.update).not.toHaveBeenCalled()
     expect(chromeStub.windows.create).toHaveBeenCalledTimes(2)
+  })
+
+  it('stops claiming a panel window once the user closes it', async () => {
+    stubChrome()
+    const { openAssistantPanel, forgetPanelWindow, hasPanelWindow, isPanelWindow } = await loadPanelHost()
+
+    await openAssistantPanel()
+    forgetPanelWindow(7)
+
+    expect(hasPanelWindow()).toBe(false)
+    expect(isPanelWindow(7)).toBe(false)
   })
 
   it('falls back to a window when a declared sidebar refuses to open', async () => {

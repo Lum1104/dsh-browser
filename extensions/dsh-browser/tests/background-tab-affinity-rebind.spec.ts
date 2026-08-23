@@ -43,6 +43,7 @@ function tab(tabId: number): chrome.tabs.Tab {
 
 function mockChrome() {
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
+  const onFocusChanged = chromeEvent<[number]>()
   const query = vi.fn(async () => [tab(1)])
   vi.stubGlobal('chrome', {
     alarms: {
@@ -88,11 +89,11 @@ function mockChrome() {
     },
     windows: {
       WINDOW_ID_NONE: -1,
-      onFocusChanged: chromeEvent<[number]>(),
+      onFocusChanged,
       onRemoved: chromeEvent<[number]>(),
     },
   } as unknown as typeof chrome)
-  return { onConnect, query }
+  return { onConnect, onFocusChanged, query }
 }
 
 async function connectPanelForTest() {
@@ -101,6 +102,7 @@ async function connectPanelForTest() {
   await import('../src/background/index.ts')
   await vi.waitFor(() => { expect(chromeMock.query).toHaveBeenCalled() })
 
+  onFocusChanged = chromeMock.onFocusChanged
   const panel = panelPort()
   chromeMock.onConnect.emit(panel.port)
   await vi.waitFor(() => {
@@ -115,6 +117,8 @@ afterEach(() => {
   vi.resetModules()
   vi.unstubAllGlobals()
 })
+
+let onFocusChanged: ReturnType<typeof chromeEvent<[number]>>
 
 describe('background tab-affinity rebind protocol', () => {
   it('acknowledges only after control has moved to the freshly queried active tab', async () => {
@@ -163,6 +167,73 @@ describe('background tab-affinity rebind protocol', () => {
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
       type: 'tab-affinity',
       state: expect.objectContaining({ status: 'following', controlled: expect.objectContaining({ tabId: 1 }) }),
+    }))
+  })
+
+  it('never binds browser control to the panel document itself', async () => {
+    // Browsers with no side-panel API host the panel in a window of its own,
+    // whose tab is the active tab while the user types in it. Content scripts
+    // never match chrome-extension://, so binding here breaks every tool.
+    const { onMessage, postMessage, query } = await connectPanelForTest()
+    onMessage.emit({ type: 'tab-affinity.rebind', id: 'initial-bind' })
+    await vi.waitFor(() => {
+      expect(postMessage).toHaveBeenCalledWith({ type: 'tab-affinity.rebind.result', id: 'initial-bind', ok: true })
+    })
+    postMessage.mockClear()
+
+    query.mockResolvedValue([{
+      ...tab(99),
+      windowId: 9,
+      title: 'dsh Browser Assistant',
+      url: 'chrome-extension://test/panel/index.html',
+    }])
+    onMessage.emit({ type: 'tab-affinity.rebind', id: 'panel-rebind' })
+
+    await vi.waitFor(() => {
+      expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'tab-affinity.rebind.result',
+        id: 'panel-rebind',
+        ok: false,
+        error: expect.objectContaining({ code: 'no-active-tab' }),
+      }))
+    })
+
+    onMessage.emit({ type: 'request-status' })
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'tab-affinity',
+      state: expect.objectContaining({
+        status: 'following',
+        controlled: expect.objectContaining({ tabId: 1 }),
+      }),
+    }))
+  })
+
+  it('does not treat focusing the panel window as a tab switch', async () => {
+    const { onMessage, postMessage, query } = await connectPanelForTest()
+    onMessage.emit({ type: 'tab-affinity.rebind', id: 'initial-bind' })
+    await vi.waitFor(() => {
+      expect(postMessage).toHaveBeenCalledWith({ type: 'tab-affinity.rebind.result', id: 'initial-bind', ok: true })
+    })
+    postMessage.mockClear()
+    query.mockClear()
+
+    // A focus event carrying the panel's own document must not enter handoff.
+    query.mockResolvedValue([{
+      ...tab(99),
+      windowId: 9,
+      title: 'dsh Browser Assistant',
+      url: 'chrome-extension://test/panel/index.html',
+    }])
+    onFocusChanged.emit(9)
+    await vi.waitFor(() => { expect(query).toHaveBeenCalled() })
+
+    onMessage.emit({ type: 'request-status' })
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'tab-affinity',
+      state: expect.objectContaining({
+        status: 'following',
+        controlled: expect.objectContaining({ tabId: 1 }),
+      }),
     }))
   })
 
