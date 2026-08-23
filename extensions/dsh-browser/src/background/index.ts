@@ -414,7 +414,13 @@ const BROWSER_WINDOW_STORAGE_KEY = 'dshBrowserWindow'
 
 let lastBrowserWindowId: number | undefined
 
+/** Whether a live event has named a window since startup, outranking storage. */
+let browserWindowObserved = false
+
 function rememberBrowserWindow(windowId: number | undefined): void {
+  // Set before the equality check: an observation that merely confirms the
+  // current value still outranks a read that is yet to land.
+  browserWindowObserved = true
   if (lastBrowserWindowId === windowId) return
   lastBrowserWindowId = windowId
   try {
@@ -430,6 +436,9 @@ function rememberBrowserWindow(windowId: number | undefined): void {
 async function restoreBrowserWindow(): Promise<void> {
   try {
     const stored = await chrome.storage.session.get(BROWSER_WINDOW_STORAGE_KEY)
+    // A toolbar click can start the worker and name its own window while this
+    // read is still in flight; the click is newer than anything stored.
+    if (browserWindowObserved) return
     const id: unknown = stored[BROWSER_WINDOW_STORAGE_KEY]
     if (typeof id === 'number' && Number.isInteger(id) && id >= 0) lastBrowserWindowId = id
   } catch {

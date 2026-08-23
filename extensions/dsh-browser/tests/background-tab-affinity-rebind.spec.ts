@@ -41,8 +41,16 @@ function tab(tabId: number): chrome.tabs.Tab {
   }
 }
 
-function mockChrome(options: { sidePanel?: boolean; session?: Record<string, unknown> } = {}) {
+function mockChrome(options: {
+  sidePanel?: boolean
+  session?: Record<string, unknown>
+  deferBrowserWindowRead?: boolean
+} = {}) {
   const sessionData: Record<string, unknown> = { ...options.session }
+  let releaseBrowserWindowRead: () => void = () => {}
+  const browserWindowRead = options.deferBrowserWindowRead === true
+    ? new Promise<void>((resolve) => { releaseBrowserWindowRead = resolve })
+    : Promise.resolve()
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
   const onFocusChanged = chromeEvent<[number]>()
   const onActivated = chromeEvent<[{ tabId: number; windowId: number }]>()
@@ -82,7 +90,15 @@ function mockChrome(options: { sidePanel?: boolean; session?: Record<string, unk
         set: vi.fn(async () => {}),
       },
       session: {
-        get: vi.fn(async (key: string) => (key in sessionData ? { [key]: sessionData[key] } : {})),
+        // A real read snapshots when it is issued, so capture the value now and
+        // deliver it later; reading after the wait would see writes that
+        // happened in between and hide exactly the staleness under test.
+        get: vi.fn((key: string) => {
+          const snapshot = key in sessionData ? { [key]: sessionData[key] } : {}
+          return key === 'dshBrowserWindow'
+            ? browserWindowRead.then(() => snapshot)
+            : Promise.resolve(snapshot)
+        }),
         set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(sessionData, items) }),
         remove: vi.fn(async (key: string) => { delete sessionData[key] }),
       },
@@ -105,6 +121,7 @@ function mockChrome(options: { sidePanel?: boolean; session?: Record<string, unk
     },
   } as unknown as typeof chrome)
   return {
+    releaseBrowserWindowRead: () => { releaseBrowserWindowRead() },
     sessionData,
     createWindow,
     onActionClicked,
@@ -405,6 +422,48 @@ describe('background tab-affinity rebind protocol', () => {
         error: expect.objectContaining({ code: 'no-active-tab' }),
       }))
     })
+  })
+
+  it('keeps the clicked window when a stored one arrives late', async () => {
+    // A toolbar click can cold-start the worker: the click names its own window
+    // while the restore read is still in flight, and is newer than the store.
+    const chromeMock = mockChrome({
+      sidePanel: false,
+      // No stored panel window, so the click opens one and hasPanelWindow()
+      // becomes true the same way it would in a real fallback session.
+      session: { dshBrowserWindow: 1 },
+      deferBrowserWindowRead: true,
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 503 })))
+    // Model the real situation: the popup holds focus, so an unfiltered
+    // last-focused query answers with the panel document, and two normal
+    // windows make the widened query ambiguous. Only the remembered window id
+    // can name a page here — which is exactly what the stale read would break.
+    const panelTab = { ...tab(99), windowId: 9, url: 'chrome-extension://test/panel/index.html' }
+    chromeMock.query.mockImplementation(async (info: chrome.tabs.QueryInfo) => {
+      if (info.windowId !== undefined) return [{ ...tab(info.windowId), windowId: info.windowId }]
+      if (info.windowType === 'normal') {
+        return [{ ...tab(1), windowId: 1 }, { ...tab(5), windowId: 5 }]
+      }
+      return [panelTab]
+    })
+    await import('../src/background/index.ts')
+
+    // The click lands first; the stale stored id resolves only afterwards.
+    chromeMock.onActionClicked.emit({ ...tab(5), windowId: 5 })
+    chromeMock.releaseBrowserWindowRead()
+    await vi.waitFor(() => { expect(chromeMock.createWindow).toHaveBeenCalled() })
+    chromeMock.resolveCreate(9)
+
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    await vi.waitFor(() => {
+      expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity' }))
+    })
+
+    const targeted = chromeMock.query.mock.calls.map(([info]) => info as chrome.tabs.QueryInfo)
+    expect(targeted.some((info) => info.windowId === 5)).toBe(true)
+    expect(targeted.some((info) => info.windowId === 1)).toBe(false)
   })
 
   it('owns the deadline in the background and ignores a query that resolves after timeout', async () => {
