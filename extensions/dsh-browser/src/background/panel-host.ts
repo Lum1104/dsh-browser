@@ -32,8 +32,13 @@ export type PanelHost = 'side-panel' | 'sidebar-action' | 'window'
 
 /** The remembered fallback window, so a second click focuses it rather than stacking a duplicate. */
 let panelWindowId: number | undefined
-/** Set before `windows.create` resolves, because the browser focuses the new window first. */
-let panelWindowPending = false
+/**
+ * The in-flight open, held for two reasons: overlapping clicks must share one
+ * window rather than each creating its own, and the browser focuses the new
+ * window before `windows.create` resolves, so the panel has to be claimed
+ * before there is an id to claim it by.
+ */
+let panelWindowOpening: Promise<void> | null = null
 
 function sidePanelApi(): SidePanelApi | undefined {
   const api = (chrome as { sidePanel?: SidePanelApi }).sidePanel
@@ -71,6 +76,17 @@ export function preferPanelOnActionClick(): void {
  * browser without a sidebar has no other way to show a panel is already up.
  */
 async function openPanelWindow(): Promise<void> {
+  // Join an open already in flight instead of racing it to a second window.
+  if (panelWindowOpening !== null) return panelWindowOpening
+  panelWindowOpening = focusOrCreatePanelWindow()
+  try {
+    await panelWindowOpening
+  } finally {
+    panelWindowOpening = null
+  }
+}
+
+async function focusOrCreatePanelWindow(): Promise<void> {
   if (panelWindowId !== undefined) {
     const focused = await chrome.windows.update(panelWindowId, { focused: true })
       .then(() => true)
@@ -79,18 +95,13 @@ async function openPanelWindow(): Promise<void> {
     // The user closed it; fall through and open a replacement.
     panelWindowId = undefined
   }
-  panelWindowPending = true
-  try {
-    const created = await chrome.windows.create({
-      url: chrome.runtime.getURL('panel/index.html'),
-      type: 'popup',
-      width: PANEL_WINDOW_WIDTH,
-      height: PANEL_WINDOW_HEIGHT,
-    }).catch(() => undefined)
-    panelWindowId = created?.id
-  } finally {
-    panelWindowPending = false
-  }
+  const created = await chrome.windows.create({
+    url: chrome.runtime.getURL('panel/index.html'),
+    type: 'popup',
+    width: PANEL_WINDOW_WIDTH,
+    height: PANEL_WINDOW_HEIGHT,
+  }).catch(() => undefined)
+  panelWindowId = created?.id
 }
 
 /**
@@ -99,7 +110,7 @@ async function openPanelWindow(): Promise<void> {
  * this to keep tab affinity pointed at the user's browser window.
  */
 export function hasPanelWindow(): boolean {
-  return panelWindowPending || panelWindowId !== undefined
+  return panelWindowOpening !== null || panelWindowId !== undefined
 }
 
 /** Whether a window is the panel's own popup rather than a browser window. */

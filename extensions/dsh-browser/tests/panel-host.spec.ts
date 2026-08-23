@@ -101,6 +101,26 @@ describe('panel host selection', () => {
     expect(chromeStub.windows.update).toHaveBeenCalledWith(7, { focused: true })
   })
 
+  it('opens one window for overlapping clicks', async () => {
+    // Two toolbar clicks land before windows.create resolves; without
+    // serializing, both see no window id yet and each opens a popup.
+    let resolveCreate: (value: { id: number }) => void = () => {}
+    const chromeStub = stubChrome({
+      windows: {
+        create: vi.fn(() => new Promise<{ id: number }>((resolve) => { resolveCreate = resolve })),
+        update: vi.fn(async () => ({})),
+      },
+    })
+    const { openAssistantPanel } = await loadPanelHost()
+
+    const first = openAssistantPanel()
+    const second = openAssistantPanel()
+    resolveCreate({ id: 7 })
+    await Promise.all([first, second])
+
+    expect(chromeStub.windows.create).toHaveBeenCalledOnce()
+  })
+
   it('reopens a panel window the user closed', async () => {
     const chromeStub = stubChrome({
       windows: {
