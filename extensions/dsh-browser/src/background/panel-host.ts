@@ -27,9 +27,6 @@ interface SidePanelApi {
   open: (options: { windowId: number }) => Promise<void>
 }
 
-/** Panel hosts, ordered most native first. */
-export type PanelHost = 'side-panel' | 'sidebar-action' | 'window'
-
 /** The remembered fallback window, so a second click focuses it rather than stacking a duplicate. */
 let panelWindowId: number | undefined
 /**
@@ -49,13 +46,6 @@ function legacySidebarApi(): LegacySidebarAction | undefined {
   const scope = globalThis as { opr?: { sidebarAction?: LegacySidebarAction } }
   const api = (chrome as { sidebarAction?: LegacySidebarAction }).sidebarAction ?? scope.opr?.sidebarAction
   return typeof api?.open === 'function' ? api : undefined
-}
-
-/** The most native panel host this browser supports. */
-export function resolvePanelHost(): PanelHost {
-  if (sidePanelApi() !== undefined) return 'side-panel'
-  if (legacySidebarApi() !== undefined) return 'sidebar-action'
-  return 'window'
 }
 
 /**
@@ -95,13 +85,18 @@ async function focusOrCreatePanelWindow(): Promise<void> {
     // The user closed it; fall through and open a replacement.
     panelWindowId = undefined
   }
-  const created = await chrome.windows.create({
-    url: chrome.runtime.getURL('panel/index.html'),
-    type: 'popup',
-    width: PANEL_WINDOW_WIDTH,
-    height: PANEL_WINDOW_HEIGHT,
-  }).catch(() => undefined)
-  panelWindowId = created?.id
+  try {
+    const created = await chrome.windows.create({
+      url: chrome.runtime.getURL('panel/index.html'),
+      type: 'popup',
+      width: PANEL_WINDOW_WIDTH,
+      height: PANEL_WINDOW_HEIGHT,
+    })
+    panelWindowId = created?.id
+  } catch {
+    // Every caller shares this promise, so a failed open must not reject onto them.
+    panelWindowId = undefined
+  }
 }
 
 /**

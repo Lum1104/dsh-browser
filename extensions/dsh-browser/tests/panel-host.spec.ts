@@ -41,9 +41,8 @@ describe('panel host selection', () => {
   it('prefers the Chrome side panel when the API is present', async () => {
     const open = vi.fn(async () => {})
     stubChrome({ sidePanel: { open } })
-    const { resolvePanelHost, openAssistantPanel } = await loadPanelHost()
+    const { openAssistantPanel } = await loadPanelHost()
 
-    expect(resolvePanelHost()).toBe('side-panel')
     await openAssistantPanel(3)
     expect(open).toHaveBeenCalledWith({ windowId: 3 })
   })
@@ -51,9 +50,8 @@ describe('panel host selection', () => {
   it('uses the legacy sidebar API when there is no Side Panel API', async () => {
     const open = vi.fn(async () => {})
     stubChrome({ sidebarAction: { open } })
-    const { resolvePanelHost, openAssistantPanel } = await loadPanelHost()
+    const { openAssistantPanel } = await loadPanelHost()
 
-    expect(resolvePanelHost()).toBe('sidebar-action')
     await openAssistantPanel()
     expect(open).toHaveBeenCalledOnce()
   })
@@ -64,25 +62,24 @@ describe('panel host selection', () => {
     vi.stubGlobal('opr', { sidebarAction: { open } })
     // Re-stub chrome: stubGlobal('opr') does not disturb it, but make the order explicit.
     vi.stubGlobal('chrome', chromeStub)
-    const { resolvePanelHost, openAssistantPanel } = await loadPanelHost()
+    const { openAssistantPanel } = await loadPanelHost()
 
-    expect(resolvePanelHost()).toBe('sidebar-action')
     await openAssistantPanel()
     expect(open).toHaveBeenCalledOnce()
   })
 
   it('ignores a sidebar namespace that exposes no open()', async () => {
-    stubChrome({ sidebarAction: {} })
-    const { resolvePanelHost } = await loadPanelHost()
+    const chromeStub = stubChrome({ sidebarAction: {} })
+    const { openAssistantPanel } = await loadPanelHost()
 
-    expect(resolvePanelHost()).toBe('window')
+    await openAssistantPanel()
+    expect(chromeStub.windows.create).toHaveBeenCalledOnce()
   })
 
   it('opens a popup window when the browser has neither sidebar API', async () => {
     const chromeStub = stubChrome()
-    const { resolvePanelHost, openAssistantPanel } = await loadPanelHost()
+    const { openAssistantPanel } = await loadPanelHost()
 
-    expect(resolvePanelHost()).toBe('window')
     await openAssistantPanel()
     expect(chromeStub.windows.create).toHaveBeenCalledWith(expect.objectContaining({
       url: 'chrome-extension://test-id/panel/index.html',
@@ -119,6 +116,19 @@ describe('panel host selection', () => {
     await Promise.all([first, second])
 
     expect(chromeStub.windows.create).toHaveBeenCalledOnce()
+  })
+
+  it('does not reject onto callers when the window cannot be created', async () => {
+    stubChrome({
+      windows: {
+        create: vi.fn(async () => { throw new Error('cannot create window') }),
+        update: vi.fn(async () => ({})),
+      },
+    })
+    const { openAssistantPanel, hasPanelWindow } = await loadPanelHost()
+
+    await expect(openAssistantPanel()).resolves.toBeUndefined()
+    expect(hasPanelWindow()).toBe(false)
   })
 
   it('reopens a panel window the user closed', async () => {
