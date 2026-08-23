@@ -62,6 +62,9 @@ Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：
 packages/browser/bridge-browser/
   cordis.patch.yml
 extensions/dsh-browser/
+  manifest.json          # Chrome，同时是其他目标的 base
+  manifest.firefox.json  # 差异
+  manifest.opera.json    # 差异
 scripts/install.sh
 scripts/install.ps1
 ```
@@ -109,7 +112,7 @@ Windows 请在 checkout 中运行 `.\scripts\install.ps1`。拉取或切换版�
 
 ### Firefox 源码构建
 
-Firefox 使用独立的 MV3 manifest、事件页后台和 Sidebar。在 checkout 中构建后，打开 `about:debugging#/runtime/this-firefox`，选择「临时载入附加组件」，再选取 `extensions/dsh-browser/dist-firefox/manifest.json`：
+Firefox 使用事件页后台和 Sidebar。它的 manifest 在构建时由 `manifest.json` 叠加 `manifest.firefox.json` 差异合成，因此各目标之间的共享字段不会漂移。在 checkout 中构建后，打开 `about:debugging#/runtime/this-firefox`，选择「临时载入附加组件」，再选取 `extensions/dsh-browser/dist-firefox/manifest.json`：
 
 ```sh
 pnpm install
@@ -117,6 +120,20 @@ pnpm --filter dsh-browser-extension run build:firefox
 ```
 
 桥地址仍会自动探测。Firefox 的 `moz-extension://` UUID 不能证明扩展身份，因此需要把 `~/.dsh/ext-bridge-token` 中的 bearer token 填入扩展设置（dsh 启动日志会报告该文件路径）。签名发布时可直接使用同一份 `dist-firefox/` 产物。
+
+### Opera 源码构建
+
+Opera 没有 Side Panel API，但会原生渲染旧版 `sidebar_action` manifest 键，因此有独立的构建目标。Chrome 对 `sidebar_action` 会在每次「加载已解压」时报「无法识别的清单键」警告，所以该键只出现在 Opera 的 manifest 里，而不放进共享部分：
+
+```sh
+pnpm install
+pnpm --filter dsh-browser-extension run build:opera
+```
+
+然后打开 `opera://extensions`，开启**开发者模式**，选择**加载已解压的扩展程序**，选取 `extensions/dsh-browser/dist-opera/`。面板会作为独立图标停靠在 Opera 左侧栏。
+
+> [!NOTE]
+> Opera 构建尚未在 Opera 上实测，见 [#34](https://github.com/Lum1104/dsh-browser/issues/34)。
 
 ### 启动与使用
 
@@ -144,7 +161,7 @@ Chrome 本机使用无需配置；Firefox 需要填写上述本地桥 token。�
 
 **点击工具栏图标没有反应**
 
-扩展会在运行时选择面板载体：Chrome 116+ 使用原生侧边面板；Firefox 和 Opera 使用侧栏，由 `sidebar_action` manifest 键完成停靠。在 Opera 上，面板还会作为独立图标出现在左侧栏。两者都不支持的浏览器会收到一条通知说明原因——扩展不会退回到普通窗口，因为 `chrome-extension://` 标签页会与浏览器工具绑定的页面相互干扰。
+扩展会在运行时选择面板载体：Chrome 116+ 使用原生侧边面板，Firefox 和 Opera 使用由 `sidebar_action` manifest 键停靠的侧栏。每个目标只携带自己浏览器认识的那个键，所以请确认加载的是与浏览器匹配的构建（`dist/`、`dist-firefox/` 或 `dist-opera/`）。两者都不支持的浏览器会收到一条通知说明原因——扩展不会退回到普通窗口，因为 `chrome-extension://` 标签页会与浏览器工具绑定的页面相互干扰。
 
 ## 开发
 

@@ -5,3 +5,4 @@ node_modules/
 !benchmark/lib/**
 **/dist/
 **/dist-firefox/
+**/dist-opera/

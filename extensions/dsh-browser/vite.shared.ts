@@ -1,7 +1,14 @@
-import { copyFileSync, cpSync, mkdirSync } from 'node:fs'
+import { cpSync, mkdirSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import tsconfigPaths from 'vite-tsconfig-paths'
 import { defineConfig } from 'vite'
+import {
+  composeManifest,
+  EXTENSION_TARGETS,
+  serializeManifest,
+  TARGET_OUT_DIR,
+  type ExtensionTarget,
+} from './manifest.compose.ts'
 
 /**
  * Shared build plumbing for the extension's three targets (background ES
@@ -10,21 +17,25 @@ import { defineConfig } from 'vite'
  */
 
 /**
- * Build target: `chrome` (default) or `firefox` (set EXT_TARGET=firefox or
- * pass --firefox to scripts/build.mjs). Each target gets its own manifest and
- * output directory so both builds can coexist.
+ * Build target: `chrome` (default), `firefox`, or `opera` (set EXT_TARGET or
+ * pass --firefox / --opera to scripts/build.mjs). Each target gets its own
+ * composed manifest and output directory so the builds can coexist.
  */
-export const browserTarget = process.env.EXT_TARGET === 'firefox' ? 'firefox' : 'chrome'
-export const targetManifest = browserTarget === 'firefox' ? 'manifest.firefox.json' : 'manifest.json'
+function resolveTarget(): ExtensionTarget {
+  const requested = process.env.EXT_TARGET
+  return EXTENSION_TARGETS.find((target) => target === requested) ?? 'chrome'
+}
 
-export const outDir = resolve(import.meta.dirname, browserTarget === 'firefox' ? 'dist-firefox' : 'dist')
+export const browserTarget = resolveTarget()
 
-/** Copy manifest, locale catalogs, and icons into the target's outDir. */
+export const outDir = resolve(import.meta.dirname, TARGET_OUT_DIR[browserTarget])
+
+/** Write the composed manifest, locale catalogs, and icons into the target's outDir. */
 export const copyManifest = {
   name: 'copy-manifest',
   closeBundle(): void {
     mkdirSync(outDir, { recursive: true })
-    copyFileSync(resolve(import.meta.dirname, targetManifest), resolve(outDir, 'manifest.json'))
+    writeFileSync(resolve(outDir, 'manifest.json'), serializeManifest(composeManifest(browserTarget)))
     cpSync(resolve(import.meta.dirname, '_locales'), resolve(outDir, '_locales'), { recursive: true })
     cpSync(resolve(import.meta.dirname, 'assets'), resolve(outDir, 'assets'), { recursive: true })
   },

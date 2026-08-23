@@ -1,8 +1,9 @@
 /**
- * Build all three extension targets sequentially into dist/ (or dist-firefox/
- * with --firefox):
- * background (es|iife) → content (iife) → panel (React). The first target
- * cleans the output; the later ones append. Pass --watch for dev rebuilds.
+ * Build all three extension bundles sequentially into the target's output
+ * directory (dist/, or dist-firefox/ with --firefox, or dist-opera/ with
+ * --opera): background (es|iife) → content (iife) → panel (React). The first
+ * bundle cleans the output; the later ones append. Pass --watch for dev
+ * rebuilds.
  */
 
 import { spawn, spawnSync } from 'node:child_process'
@@ -11,9 +12,12 @@ import { fileURLToPath } from 'node:url'
 const root = fileURLToPath(new URL('..', import.meta.url))
 const watch = process.argv.includes('--watch')
 
-// --firefox switches the manifest and background bundle for the Firefox build.
+// The target switches the composed manifest, and for Firefox the background
+// bundle format as well.
 if (process.argv.includes('--firefox')) {
   process.env.EXT_TARGET = 'firefox'
+} else if (process.argv.includes('--opera')) {
+  process.env.EXT_TARGET = 'opera'
 }
 
 const configs = [

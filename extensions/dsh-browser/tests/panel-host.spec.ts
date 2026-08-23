@@ -159,30 +159,3 @@ describe('panel host selection', () => {
     expect(() => { preferPanelOnActionClick() }).not.toThrow()
   })
 })
-
-describe('Chrome manifest panel hosts', () => {
-  it('declares both panel keys so Opera docks the panel natively', () => {
-    const manifest = JSON.parse(
-      readFileSync(`${process.cwd()}/manifest.json`, 'utf8'),
-    ) as {
-      side_panel?: { default_path?: string }
-      sidebar_action?: { default_panel?: string; default_icon?: Record<string, string> }
-    }
-
-    // Chrome reads side_panel and ignores sidebar_action; Opera does the
-    // reverse, and both point at the same panel document.
-    expect(manifest.side_panel?.default_path).toBe('panel/index.html')
-    expect(manifest.sidebar_action?.default_panel).toBe('panel/index.html')
-    expect(manifest.sidebar_action?.default_icon).toBeDefined()
-  })
-
-  it('needs no extra permission for the legacy sidebar', () => {
-    const manifest = JSON.parse(
-      readFileSync(`${process.cwd()}/manifest.json`, 'utf8'),
-    ) as { permissions: string[] }
-
-    // Opera-store extensions declare sidebar_action without a "sidebar"
-    // permission; requesting one would add an install-time prompt for nothing.
-    expect(manifest.permissions).not.toContain('sidebar')
-  })
-})

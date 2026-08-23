@@ -1,9 +1,4 @@
 {
-  "manifest_version": 3,
-  "name": "__MSG_extensionName__",
-  "description": "__MSG_extensionDescription__",
-  "default_locale": "en",
-  "version": "0.1.2",
   "browser_specific_settings": {
     "gecko": {
       "id": "dsh-browser@lum1104.github.io",
@@ -27,21 +22,10 @@
     "alarms",
     "notifications"
   ],
-  "host_permissions": [
-    "http://*/*",
-    "https://*/*"
-  ],
   "background": {
     "scripts": [
       "background.js"
     ]
-  },
-  "action": {
-    "default_title": "__MSG_actionTitle__",
-    "default_icon": {
-      "16": "assets/icons/icon16.png",
-      "32": "assets/icons/icon32.png"
-    }
   },
   "sidebar_action": {
     "default_title": "__MSG_actionTitle__",
@@ -67,13 +51,6 @@
       "match_about_blank": true
     }
   ],
-  "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:* http://127.0.0.1:* https://raw.githubusercontent.com"
-  },
-  "icons": {
-    "16": "assets/icons/icon16.png",
-    "32": "assets/icons/icon32.png",
-    "48": "assets/icons/icon48.png",
-    "128": "assets/icons/icon128.png"
-  }
+  "minimum_chrome_version": null,
+  "side_panel": null
 }

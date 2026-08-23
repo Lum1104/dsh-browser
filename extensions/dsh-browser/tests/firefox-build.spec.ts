@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { readFile } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
+import { composeManifest } from '../manifest.compose.ts'
 
 interface ExtensionManifest {
   version: string
@@ -20,13 +21,16 @@ async function readJson<T>(relativePath: string): Promise<T> {
   return JSON.parse(await readFile(new URL(relativePath, import.meta.url), 'utf8')) as T
 }
 
+/** manifest.firefox.json is a delta now; the shipped manifest is composed. */
+function shipped(target: 'chrome' | 'firefox'): ExtensionManifest {
+  return composeManifest(target) as unknown as ExtensionManifest
+}
+
 describe('Firefox build contract', () => {
   it('keeps release metadata and shared capabilities aligned with Chrome', async () => {
-    const [chromeManifest, firefoxManifest, packageManifest] = await Promise.all([
-      readJson<ExtensionManifest>('../manifest.json'),
-      readJson<ExtensionManifest>('../manifest.firefox.json'),
-      readJson<{ version: string }>('../package.json'),
-    ])
+    const chromeManifest = shipped('chrome')
+    const firefoxManifest = shipped('firefox')
+    const packageManifest = await readJson<{ version: string }>('../package.json')
 
     expect(firefoxManifest.version).toBe(packageManifest.version)
     expect(firefoxManifest.version).toBe(chromeManifest.version)
@@ -35,7 +39,7 @@ describe('Firefox build contract', () => {
   })
 
   it('uses a Firefox event page, sidebar, and AMO data-transmission declaration', async () => {
-    const manifest = await readJson<ExtensionManifest>('../manifest.firefox.json')
+    const manifest = shipped('firefox')
 
     expect(manifest.background).toEqual({ scripts: ['background.js'] })
     expect(manifest.sidebar_action).toMatchObject({

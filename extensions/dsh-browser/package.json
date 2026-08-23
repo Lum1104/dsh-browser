@@ -9,8 +9,10 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:firefox": "node scripts/build.mjs --firefox",
+    "build:opera": "node scripts/build.mjs --opera",
     "dev": "node scripts/build.mjs --watch",
     "dev:firefox": "node scripts/build.mjs --firefox --watch",
+    "dev:opera": "node scripts/build.mjs --opera --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },

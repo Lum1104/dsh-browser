@@ -62,6 +62,9 @@ The paired Playwright / extension duration ratio was **1.24** (95% CI **1.16–1
 packages/browser/bridge-browser/
   cordis.patch.yml
 extensions/dsh-browser/
+  manifest.json          # Chrome, and the base for the others
+  manifest.firefox.json  # delta
+  manifest.opera.json    # delta
 scripts/install.sh
 scripts/install.ps1
 ```
@@ -109,7 +112,7 @@ On Windows, run `.\scripts\install.ps1` from the checkout instead. After pulling
 
 ### Firefox source build
 
-Firefox uses a separate MV3 manifest, event-page background, and sidebar. Build it from a checkout, then open `about:debugging#/runtime/this-firefox`, choose **Load Temporary Add-on**, and select `extensions/dsh-browser/dist-firefox/manifest.json`:
+Firefox uses an event-page background and the sidebar. Its manifest is composed at build time from `manifest.json` plus the `manifest.firefox.json` delta, so shared metadata cannot drift between targets. Build it from a checkout, then open `about:debugging#/runtime/this-firefox`, choose **Load Temporary Add-on**, and select `extensions/dsh-browser/dist-firefox/manifest.json`:
 
 ```sh
 pnpm install
@@ -117,6 +120,20 @@ pnpm --filter dsh-browser-extension run build:firefox
 ```
 
 The bridge address is still auto-discovered. Firefox's `moz-extension://` UUID does not authenticate an add-on, so copy the bearer token from `~/.dsh/ext-bridge-token` into the extension settings (the dsh startup log reports that file's path). Signed distribution can package the same `dist-firefox/` output.
+
+### Opera source build
+
+Opera has no Side Panel API but renders the legacy `sidebar_action` manifest key natively, so it gets its own build. Chrome reports an unrecognized-key warning for `sidebar_action` on every unpacked install, which is why the key ships only in the Opera manifest rather than in the shared one:
+
+```sh
+pnpm install
+pnpm --filter dsh-browser-extension run build:opera
+```
+
+Then open `opera://extensions`, enable **Developer mode**, choose **Load unpacked**, and select `extensions/dsh-browser/dist-opera/`. The panel docks as its own icon in Opera's left sidebar.
+
+> [!NOTE]
+> The Opera build has not been verified on Opera itself yet; see [#34](https://github.com/Lum1104/dsh-browser/issues/34).
 
 ### Start and use
 
@@ -144,7 +161,7 @@ Local Chrome use requires no configuration; Firefox requires the local bridge to
 
 **Clicking the toolbar icon does nothing**
 
-The extension picks its panel host at runtime. Chrome 116+ uses the native side panel; Firefox and Opera use the sidebar, which they dock from the `sidebar_action` manifest key. On Opera the panel also appears as its own icon in the left sidebar. A browser with neither host raises a notification saying so — the panel is not opened in an ordinary window, because a `chrome-extension://` tab would compete with the page the browser tools are bound to.
+The extension picks its panel host at runtime: Chrome 116+ uses the native side panel, while Firefox and Opera use the sidebar they dock from the `sidebar_action` manifest key. Each target ships only the key its browser understands, so make sure you loaded the build that matches the browser (`dist/`, `dist-firefox/`, or `dist-opera/`). A browser with neither host raises a notification saying so — the panel is not opened in an ordinary window, because a `chrome-extension://` tab would compete with the page the browser tools are bound to.
 
 ## Development
 
