@@ -416,16 +416,35 @@ function activeTabQuery(windowId?: number): chrome.tabs.QueryInfo {
   return { active: true, lastFocusedWindow: true }
 }
 
+/**
+ * The active tab, never the panel's own document. A remembered browser window
+ * can have closed since it was recorded, so a guess that finds nothing widens
+ * to any normal window rather than reporting no active tab while one is open.
+ * An explicit `windowId` is the caller's choice and is never widened.
+ */
+async function queryActiveBrowserTab(
+  windowId: number | undefined,
+  signal?: AbortSignal,
+): Promise<chrome.tabs.Tab | undefined> {
+  const run = async (query: chrome.tabs.QueryInfo): Promise<chrome.tabs.Tab | undefined> => {
+    const tabs = chrome.tabs.query(query)
+    const resolved = signal === undefined ? await tabs : await abortable(tabs, signal)
+    // Fail closed rather than bind browser tools to the panel's own document.
+    return resolved.find((candidate) => !isPanelDocument(candidate.url))
+  }
+
+  const found = await run(activeTabQuery(windowId))
+  if (found !== undefined || windowId !== undefined) return found
+  // windowType excludes the panel popup, so this can only answer with a page.
+  return run({ active: true, windowType: 'normal' })
+}
+
 async function syncActiveTab(windowId?: number, signal?: AbortSignal): Promise<chrome.tabs.Tab | undefined> {
   const queryRevision = focusedWindow.beginQuery()
-  const query = activeTabQuery(windowId)
   try {
-    const tabs = chrome.tabs.query(query)
-    const [tab] = signal === undefined ? await tabs : await abortable(tabs, signal)
+    const tab = await queryActiveBrowserTab(windowId, signal)
     if (signal !== undefined) throwIfRebindAborted(signal)
     if (tab === undefined) return undefined
-    // Fail closed rather than bind browser tools to the panel's own document.
-    if (isPanelDocument(tab.url)) return undefined
     if (!focusedWindow.commitQuery(tab.windowId, queryRevision)) return undefined
     if (signal !== undefined) throwIfRebindAborted(signal)
     lastBrowserWindowId = tab.windowId
@@ -1123,7 +1142,12 @@ chrome.action.onClicked.addListener((tab) => {
   if (tab.windowId !== undefined) lastBrowserWindowId = tab.windowId
   void openAssistantPanel(tab.windowId)
 })
-chrome.windows.onRemoved.addListener((windowId) => { forgetPanelWindow(windowId) })
+chrome.windows.onRemoved.addListener((windowId) => {
+  forgetPanelWindow(windowId)
+  // A closed window cannot answer an active-tab query; drop it so the next
+  // sync widens instead of targeting a window that is gone.
+  if (lastBrowserWindowId === windowId) lastBrowserWindowId = undefined
+})
 
 // Alarms survive some extension/service-worker restarts. Remove any stale
 // schedule left by an older eager-connection build; onConnect re-arms it.

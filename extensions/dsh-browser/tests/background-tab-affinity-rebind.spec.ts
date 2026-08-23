@@ -45,8 +45,9 @@ function mockChrome(options: { sidePanel?: boolean } = {}) {
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
   const onFocusChanged = chromeEvent<[number]>()
   const onActivated = chromeEvent<[{ tabId: number; windowId: number }]>()
+  const onWindowRemoved = chromeEvent<[number]>()
   const onActionClicked = chromeEvent<[chrome.tabs.Tab]>()
-  const query = vi.fn(async () => [tab(1)])
+  const query = vi.fn(async (_info: chrome.tabs.QueryInfo) => [tab(1)])
   // Browsers with no Side Panel API host the panel in a window of its own.
   let resolveCreate: (value: { id: number }) => void = () => {}
   const createWindow = vi.fn(() => new Promise<{ id: number }>((resolve) => { resolveCreate = resolve }))
@@ -97,7 +98,7 @@ function mockChrome(options: { sidePanel?: boolean } = {}) {
     windows: {
       WINDOW_ID_NONE: -1,
       onFocusChanged,
-      onRemoved: chromeEvent<[number]>(),
+      onRemoved: onWindowRemoved,
       create: createWindow,
       update: vi.fn(async () => ({})),
     },
@@ -108,6 +109,7 @@ function mockChrome(options: { sidePanel?: boolean } = {}) {
     onActivated,
     onConnect,
     onFocusChanged,
+    onWindowRemoved,
     query,
     resolveCreate: (id: number) => { resolveCreate({ id }) },
   }
@@ -295,6 +297,66 @@ describe('background tab-affinity rebind protocol', () => {
         status: 'following',
         controlled: expect.objectContaining({ tabId: 1 }),
       }),
+    }))
+  })
+
+  /** Bind to window 1, then open the fallback popup on top of it. */
+  async function bindThenOpenPopup() {
+    const chromeMock = mockChrome({ sidePanel: false })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 503 })))
+    await import('../src/background/index.ts')
+    await vi.waitFor(() => { expect(chromeMock.query).toHaveBeenCalled() })
+
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    await vi.waitFor(() => {
+      expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity' }))
+    })
+
+    chromeMock.onFocusChanged.emit(1)
+    await vi.waitFor(() => {
+      expect(chromeMock.query).toHaveBeenCalledWith(expect.objectContaining({ windowId: 1 }))
+    })
+    chromeMock.onActionClicked.emit(tab(1))
+    await vi.waitFor(() => { expect(chromeMock.createWindow).toHaveBeenCalled() })
+    chromeMock.resolveCreate(9)
+    return { ...chromeMock, panel }
+  }
+
+  it('stops targeting a browser window that has closed', async () => {
+    // The popup keeps focus after the originating window closes, and its own
+    // focus events are ignored, so nothing else would refresh the stale id.
+    const { onWindowRemoved, panel, query } = await bindThenOpenPopup()
+
+    onWindowRemoved.emit(1)
+    query.mockClear()
+
+    panel.onMessage.emit({ type: 'tab-affinity.rebind', id: 'after-close' })
+    await vi.waitFor(() => { expect(query).toHaveBeenCalled() })
+
+    const targeted = query.mock.calls.map(([info]) => info as chrome.tabs.QueryInfo)
+    expect(targeted.some((info) => info.windowId === 1)).toBe(false)
+  })
+
+  it('recovers through another window when the remembered one answers nothing', async () => {
+    const { panel, query } = await bindThenOpenPopup()
+    panel.postMessage.mockClear()
+
+    // Window 1 no longer has an active tab; only a normal-window query finds one.
+    const survivor = { ...tab(2), windowId: 2 }
+    query.mockImplementation(async (info: chrome.tabs.QueryInfo) => (
+      info.windowType === 'normal' ? [survivor] : []
+    ))
+
+    panel.onMessage.emit({ type: 'tab-affinity.rebind', id: 'widen' })
+    await vi.waitFor(() => {
+      expect(panel.postMessage).toHaveBeenCalledWith({
+        type: 'tab-affinity.rebind.result', id: 'widen', ok: true,
+      })
+    })
+    expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'tab-affinity',
+      state: expect.objectContaining({ controlled: expect.objectContaining({ tabId: 2 }) }),
     }))
   })
 
