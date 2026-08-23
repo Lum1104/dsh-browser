@@ -58,15 +58,7 @@ import {
   type TabAffinityDecision,
 } from './tab-affinity.ts'
 import { FocusedWindowTracker } from './focused-window.ts'
-import {
-  forgetPanelWindow,
-  hasPanelWindow,
-  isPanelDocument,
-  isPanelWindow,
-  openAssistantPanel,
-  panelWindowSettled,
-  preferPanelOnActionClick,
-} from './panel-host.ts'
+import { openAssistantPanel, preferPanelOnActionClick } from './panel-host.ts'
 import { ApprovalCoordinator, type ApprovalRequestResult } from './approval-coordinator.ts'
 import {
   RECENT_SESSION_STORAGE_KEY,
@@ -401,98 +393,18 @@ function observeActiveTab(tab: chrome.tabs.Tab): void {
   if (summary !== null) observeActiveSummary(summary)
 }
 
-/**
- * The last window that held a real page. Only consulted where the panel lives
- * in a window of its own: there Chrome's last-focused window is the panel
- * itself while the user types in it, which must never become the tool target.
- *
- * Persisted for the same reason the panel window is: an MV3 restart while the
- * popup is open would otherwise forget which window the user came from, and
- * the popup still answers as the last-focused one.
- */
-const BROWSER_WINDOW_STORAGE_KEY = 'dshBrowserWindow'
-
-let lastBrowserWindowId: number | undefined
-
-/** Whether a live event has named a window since startup, outranking storage. */
-let browserWindowObserved = false
-
-function rememberBrowserWindow(windowId: number | undefined): void {
-  // Set before the equality check: an observation that merely confirms the
-  // current value still outranks a read that is yet to land.
-  browserWindowObserved = true
-  if (lastBrowserWindowId === windowId) return
-  lastBrowserWindowId = windowId
-  try {
-    void (windowId === undefined
-      ? chrome.storage.session.remove(BROWSER_WINDOW_STORAGE_KEY)
-      : chrome.storage.session.set({ [BROWSER_WINDOW_STORAGE_KEY]: windowId })
-    ).catch(() => {})
-  } catch {
-    // Persistence is a convenience; losing it costs a widened query, not correctness.
-  }
-}
-
-async function restoreBrowserWindow(): Promise<void> {
-  try {
-    const stored = await chrome.storage.session.get(BROWSER_WINDOW_STORAGE_KEY)
-    // A toolbar click can start the worker and name its own window while this
-    // read is still in flight; the click is newer than anything stored.
-    if (browserWindowObserved) return
-    const id: unknown = stored[BROWSER_WINDOW_STORAGE_KEY]
-    if (typeof id === 'number' && Number.isInteger(id) && id >= 0) lastBrowserWindowId = id
-  } catch {
-    // Same as above.
-  }
-}
-
-function activeTabQuery(windowId?: number): chrome.tabs.QueryInfo {
-  if (windowId !== undefined) return { active: true, windowId }
-  if (hasPanelWindow() && lastBrowserWindowId !== undefined) {
-    return { active: true, windowId: lastBrowserWindowId }
-  }
-  return { active: true, lastFocusedWindow: true }
-}
-
-/**
- * The active tab, never the panel's own document. A remembered browser window
- * can have closed since it was recorded, so a guess that finds nothing widens
- * to any normal window rather than reporting no active tab while one is open.
- * An explicit `windowId` is the caller's choice and is never widened.
- */
-async function queryActiveBrowserTab(
-  windowId: number | undefined,
-  signal?: AbortSignal,
-): Promise<chrome.tabs.Tab | undefined> {
-  const run = async (query: chrome.tabs.QueryInfo): Promise<chrome.tabs.Tab | undefined> => {
-    const tabs = chrome.tabs.query(query)
-    const resolved = signal === undefined ? await tabs : await abortable(tabs, signal)
-    // Fail closed rather than bind browser tools to the panel's own document.
-    return resolved.find((candidate) => !isPanelDocument(candidate.url))
-  }
-
-  const found = await run(activeTabQuery(windowId))
-  if (found !== undefined || windowId !== undefined) return found
-
-  // Last resort. windowType excludes the panel popup, so this can only answer
-  // with a page, but it answers for every normal window at once. Binding to an
-  // arbitrary one would move browser control silently, which this codebase
-  // never does on an ambiguous signal, so only an unambiguous answer counts.
-  const tabs = chrome.tabs.query({ active: true, windowType: 'normal' })
-  const resolved = signal === undefined ? await tabs : await abortable(tabs, signal)
-  const pages = resolved.filter((candidate) => !isPanelDocument(candidate.url))
-  return pages.length === 1 ? pages[0] : undefined
-}
-
 async function syncActiveTab(windowId?: number, signal?: AbortSignal): Promise<chrome.tabs.Tab | undefined> {
   const queryRevision = focusedWindow.beginQuery()
+  const query = windowId === undefined
+    ? { active: true, lastFocusedWindow: true }
+    : { active: true, windowId }
   try {
-    const tab = await queryActiveBrowserTab(windowId, signal)
+    const tabs = chrome.tabs.query(query)
+    const [tab] = signal === undefined ? await tabs : await abortable(tabs, signal)
     if (signal !== undefined) throwIfRebindAborted(signal)
     if (tab === undefined) return undefined
     if (!focusedWindow.commitQuery(tab.windowId, queryRevision)) return undefined
     if (signal !== undefined) throwIfRebindAborted(signal)
-    rememberBrowserWindow(tab.windowId)
     observeActiveTab(tab)
     return tab
   } catch {
@@ -502,8 +414,6 @@ async function syncActiveTab(windowId?: number, signal?: AbortSignal): Promise<c
 }
 
 async function restoreTabAffinity(): Promise<void> {
-  // Before any sync: the first one runs inside this function.
-  await restoreBrowserWindow()
   let record: StoredTabAffinity | null = null
   try {
     const stored = await chrome.storage.session.get(TAB_AFFINITY_STORAGE_KEY)
@@ -1084,9 +994,6 @@ chrome.notifications.onClicked.addListener((notificationId) => {
 // ---- Tab affinity ----
 
 chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
-  // The panel window's own tab is never a page to control. acceptActivation
-  // already rejects it while the tracker points elsewhere; this states it.
-  if (isPanelWindow(windowId)) return
   void affinityReady.then(() => {
     const activationRevision = focusedWindow.acceptActivation(windowId)
     if (activationRevision === null) return
@@ -1142,24 +1049,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   })
 })
 
-function trackFocusedWindow(windowId: number): void {
-  // Marking the panel's own window focused is what would let its activation
-  // through: tabs.onActivated marks a switch before it has any URL to reject,
-  // so the guard has to be here, where the window is still identifiable.
-  if (isPanelWindow(windowId)) return
-  focusedWindow.markFocused(windowId)
-  void affinityReady.then(() => syncActiveTab(windowId))
-}
-
 chrome.windows.onFocusChanged.addListener((windowId) => {
   if (windowId === chrome.windows.WINDOW_ID_NONE) return
-  // The browser focuses a new panel window before windows.create resolves, so
-  // mid-open this window has no id to compare against yet. Wait for it.
-  if (hasPanelWindow() && !isPanelWindow(windowId)) {
-    void panelWindowSettled().then(() => { trackFocusedWindow(windowId) })
-    return
-  }
-  trackFocusedWindow(windowId)
+  focusedWindow.markFocused(windowId)
+  void affinityReady.then(() => syncActiveTab(windowId))
 })
 
 // ---- Keepalive ----
@@ -1184,17 +1077,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // itself; Firefox and Opera deliver action.onClicked instead, so the listener is
 // registered for every build and openAssistantPanel picks the host at runtime.
 preferPanelOnActionClick()
-chrome.action.onClicked.addListener((tab) => {
-  // Record the window the click came from before any panel window can steal focus.
-  if (tab.windowId !== undefined) rememberBrowserWindow(tab.windowId)
-  void openAssistantPanel(tab.windowId)
-})
-chrome.windows.onRemoved.addListener((windowId) => {
-  forgetPanelWindow(windowId)
-  // A closed window cannot answer an active-tab query; drop it so the next
-  // sync widens instead of targeting a window that is gone.
-  if (lastBrowserWindowId === windowId) rememberBrowserWindow(undefined)
-})
+chrome.action.onClicked.addListener((tab) => { void openAssistantPanel(tab.windowId) })
 
 // Alarms survive some extension/service-worker restarts. Remove any stale
 // schedule left by an older eager-connection build; onConnect re-arms it.

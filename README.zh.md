@@ -144,7 +144,7 @@ Chrome 本机使用无需配置；Firefox 需要填写上述本地桥 token。�
 
 **点击工具栏图标没有反应**
 
-扩展会在运行时选择面板载体：Chrome 116+ 使用原生侧边面板；Firefox 和 Opera 使用侧栏，由 `sidebar_action` manifest 键完成停靠；其他 Chromium 浏览器则打开一个窄弹出窗口。在 Opera 上，面板还会作为独立图标出现在左侧栏。如果完全没有反应，请查看扩展 service worker 控制台中失败的调用。
+扩展会在运行时选择面板载体：Chrome 116+ 使用原生侧边面板；Firefox 和 Opera 使用侧栏，由 `sidebar_action` manifest 键完成停靠。在 Opera 上，面板还会作为独立图标出现在左侧栏。两者都不支持的浏览器会收到一条通知说明原因——扩展不会退回到普通窗口，因为 `chrome-extension://` 标签页会与浏览器工具绑定的页面相互干扰。
 
 ## 开发
 

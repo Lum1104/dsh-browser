@@ -144,7 +144,7 @@ Local Chrome use requires no configuration; Firefox requires the local bridge to
 
 **Clicking the toolbar icon does nothing**
 
-The extension picks its panel host at runtime. Chrome 116+ uses the native side panel; Firefox and Opera use the sidebar, which they dock from the `sidebar_action` manifest key; any other Chromium browser gets a narrow popup window. On Opera the panel also appears as its own icon in the left sidebar. If nothing opens at all, check the extension's service-worker console for the failing call.
+The extension picks its panel host at runtime. Chrome 116+ uses the native side panel; Firefox and Opera use the sidebar, which they dock from the `sidebar_action` manifest key. On Opera the panel also appears as its own icon in the left sidebar. A browser with neither host raises a notification saying so — the panel is not opened in an ordinary window, because a `chrome-extension://` tab would compete with the page the browser tools are bound to.
 
 ## Development
 

@@ -104,7 +104,6 @@ function mockChrome(options: {
     windows: {
       WINDOW_ID_NONE: -1,
       onFocusChanged: chromeEvent<[number]>(),
-      onRemoved: chromeEvent<[number]>(),
     },
   } as unknown as typeof chrome)
   return { alarms, onConnect }
