@@ -405,8 +405,37 @@ function observeActiveTab(tab: chrome.tabs.Tab): void {
  * The last window that held a real page. Only consulted where the panel lives
  * in a window of its own: there Chrome's last-focused window is the panel
  * itself while the user types in it, which must never become the tool target.
+ *
+ * Persisted for the same reason the panel window is: an MV3 restart while the
+ * popup is open would otherwise forget which window the user came from, and
+ * the popup still answers as the last-focused one.
  */
+const BROWSER_WINDOW_STORAGE_KEY = 'dshBrowserWindow'
+
 let lastBrowserWindowId: number | undefined
+
+function rememberBrowserWindow(windowId: number | undefined): void {
+  if (lastBrowserWindowId === windowId) return
+  lastBrowserWindowId = windowId
+  try {
+    void (windowId === undefined
+      ? chrome.storage.session.remove(BROWSER_WINDOW_STORAGE_KEY)
+      : chrome.storage.session.set({ [BROWSER_WINDOW_STORAGE_KEY]: windowId })
+    ).catch(() => {})
+  } catch {
+    // Persistence is a convenience; losing it costs a widened query, not correctness.
+  }
+}
+
+async function restoreBrowserWindow(): Promise<void> {
+  try {
+    const stored = await chrome.storage.session.get(BROWSER_WINDOW_STORAGE_KEY)
+    const id: unknown = stored[BROWSER_WINDOW_STORAGE_KEY]
+    if (typeof id === 'number' && Number.isInteger(id) && id >= 0) lastBrowserWindowId = id
+  } catch {
+    // Same as above.
+  }
+}
 
 function activeTabQuery(windowId?: number): chrome.tabs.QueryInfo {
   if (windowId !== undefined) return { active: true, windowId }
@@ -435,8 +464,15 @@ async function queryActiveBrowserTab(
 
   const found = await run(activeTabQuery(windowId))
   if (found !== undefined || windowId !== undefined) return found
-  // windowType excludes the panel popup, so this can only answer with a page.
-  return run({ active: true, windowType: 'normal' })
+
+  // Last resort. windowType excludes the panel popup, so this can only answer
+  // with a page, but it answers for every normal window at once. Binding to an
+  // arbitrary one would move browser control silently, which this codebase
+  // never does on an ambiguous signal, so only an unambiguous answer counts.
+  const tabs = chrome.tabs.query({ active: true, windowType: 'normal' })
+  const resolved = signal === undefined ? await tabs : await abortable(tabs, signal)
+  const pages = resolved.filter((candidate) => !isPanelDocument(candidate.url))
+  return pages.length === 1 ? pages[0] : undefined
 }
 
 async function syncActiveTab(windowId?: number, signal?: AbortSignal): Promise<chrome.tabs.Tab | undefined> {
@@ -447,7 +483,7 @@ async function syncActiveTab(windowId?: number, signal?: AbortSignal): Promise<c
     if (tab === undefined) return undefined
     if (!focusedWindow.commitQuery(tab.windowId, queryRevision)) return undefined
     if (signal !== undefined) throwIfRebindAborted(signal)
-    lastBrowserWindowId = tab.windowId
+    rememberBrowserWindow(tab.windowId)
     observeActiveTab(tab)
     return tab
   } catch {
@@ -457,6 +493,8 @@ async function syncActiveTab(windowId?: number, signal?: AbortSignal): Promise<c
 }
 
 async function restoreTabAffinity(): Promise<void> {
+  // Before any sync: the first one runs inside this function.
+  await restoreBrowserWindow()
   let record: StoredTabAffinity | null = null
   try {
     const stored = await chrome.storage.session.get(TAB_AFFINITY_STORAGE_KEY)
@@ -1139,14 +1177,14 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 preferPanelOnActionClick()
 chrome.action.onClicked.addListener((tab) => {
   // Record the window the click came from before any panel window can steal focus.
-  if (tab.windowId !== undefined) lastBrowserWindowId = tab.windowId
+  if (tab.windowId !== undefined) rememberBrowserWindow(tab.windowId)
   void openAssistantPanel(tab.windowId)
 })
 chrome.windows.onRemoved.addListener((windowId) => {
   forgetPanelWindow(windowId)
   // A closed window cannot answer an active-tab query; drop it so the next
   // sync widens instead of targeting a window that is gone.
-  if (lastBrowserWindowId === windowId) lastBrowserWindowId = undefined
+  if (lastBrowserWindowId === windowId) rememberBrowserWindow(undefined)
 })
 
 // Alarms survive some extension/service-worker restarts. Remove any stale

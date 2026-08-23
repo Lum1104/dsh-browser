@@ -41,7 +41,8 @@ function tab(tabId: number): chrome.tabs.Tab {
   }
 }
 
-function mockChrome(options: { sidePanel?: boolean } = {}) {
+function mockChrome(options: { sidePanel?: boolean; session?: Record<string, unknown> } = {}) {
+  const sessionData: Record<string, unknown> = { ...options.session }
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
   const onFocusChanged = chromeEvent<[number]>()
   const onActivated = chromeEvent<[{ tabId: number; windowId: number }]>()
@@ -81,9 +82,9 @@ function mockChrome(options: { sidePanel?: boolean } = {}) {
         set: vi.fn(async () => {}),
       },
       session: {
-        get: vi.fn(async () => ({})),
-        set: vi.fn(async () => {}),
-        remove: vi.fn(async () => {}),
+        get: vi.fn(async (key: string) => (key in sessionData ? { [key]: sessionData[key] } : {})),
+        set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(sessionData, items) }),
+        remove: vi.fn(async (key: string) => { delete sessionData[key] }),
       },
     },
     tabs: {
@@ -104,6 +105,7 @@ function mockChrome(options: { sidePanel?: boolean } = {}) {
     },
   } as unknown as typeof chrome)
   return {
+    sessionData,
     createWindow,
     onActionClicked,
     onActivated,
@@ -358,6 +360,51 @@ describe('background tab-affinity rebind protocol', () => {
       type: 'tab-affinity',
       state: expect.objectContaining({ controlled: expect.objectContaining({ tabId: 2 }) }),
     }))
+  })
+
+  it('remembers the originating window across a service-worker restart', async () => {
+    // The popup survives an MV3 restart and still answers as lastFocusedWindow,
+    // so without the stored id every no-argument sync would have to guess.
+    const chromeMock = mockChrome({
+      sidePanel: false,
+      session: { dshPanelWindow: 9, dshBrowserWindow: 1 },
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 503 })))
+    await import('../src/background/index.ts')
+
+    await vi.waitFor(() => {
+      expect(chromeMock.query).toHaveBeenCalledWith(expect.objectContaining({ windowId: 1 }))
+    })
+  })
+
+  it('refuses to guess between several browser windows', async () => {
+    // windowType: 'normal' answers for every window at once. Picking one would
+    // move browser control silently, so an ambiguous answer binds nothing.
+    const chromeMock = mockChrome({ sidePanel: false })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 503 })))
+    await import('../src/background/index.ts')
+    await vi.waitFor(() => { expect(chromeMock.query).toHaveBeenCalled() })
+
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    await vi.waitFor(() => {
+      expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity' }))
+    })
+    panel.postMessage.mockClear()
+
+    chromeMock.query.mockImplementation(async (info: chrome.tabs.QueryInfo) => (
+      info.windowType === 'normal' ? [{ ...tab(2), windowId: 2 }, { ...tab(3), windowId: 3 }] : []
+    ))
+
+    panel.onMessage.emit({ type: 'tab-affinity.rebind', id: 'ambiguous' })
+    await vi.waitFor(() => {
+      expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'tab-affinity.rebind.result',
+        id: 'ambiguous',
+        ok: false,
+        error: expect.objectContaining({ code: 'no-active-tab' }),
+      }))
+    })
   })
 
   it('owns the deadline in the background and ignores a query that resolves after timeout', async () => {
