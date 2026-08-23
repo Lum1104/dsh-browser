@@ -50,6 +50,9 @@ function mockChrome() {
       clear: vi.fn(async () => true),
       onAlarm: chromeEvent<[chrome.alarms.Alarm]>(),
     },
+    action: {
+      onClicked: chromeEvent<[chrome.tabs.Tab]>(),
+    },
     notifications: {
       create: vi.fn(async () => ''),
       clear: vi.fn(async () => true),
@@ -86,6 +89,7 @@ function mockChrome() {
     windows: {
       WINDOW_ID_NONE: -1,
       onFocusChanged: chromeEvent<[number]>(),
+      onRemoved: chromeEvent<[number]>(),
     },
   } as unknown as typeof chrome)
   return { onConnect, query }

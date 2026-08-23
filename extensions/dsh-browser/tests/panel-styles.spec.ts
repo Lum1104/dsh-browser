@@ -13,4 +13,15 @@ describe('panel layout styles', () => {
     expect(settingsRule).toMatch(/(?:^|\n)\s*overflow-y:\s*auto;/)
     expect(settingsRule).toMatch(/(?:^|\n)\s*overscroll-behavior:\s*contain;/)
   })
+
+  it('keeps settings cards at their natural height so a short window scrolls', () => {
+    const styles = readFileSync(`${process.cwd()}/src/panel/styles.css`, 'utf8')
+    const childRule = styles.match(/\.settings\s*>\s*\*\s*\{([^}]*)\}/)?.[1]
+
+    // The cards set overflow:hidden, which zeroes their flex min-height; without
+    // this they compress instead of scrolling and "Save & Connect" goes
+    // out of reach, which is the only way to persist bridge settings.
+    expect(childRule).toBeDefined()
+    expect(childRule).toMatch(/(?:^|\n)\s*flex-shrink:\s*0;/)
+  })
 })

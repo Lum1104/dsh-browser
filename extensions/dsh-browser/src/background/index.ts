@@ -58,6 +58,7 @@ import {
   type TabAffinityDecision,
 } from './tab-affinity.ts'
 import { FocusedWindowTracker } from './focused-window.ts'
+import { forgetPanelWindow, openAssistantPanel, preferPanelOnActionClick } from './panel-host.ts'
 import { ApprovalCoordinator, type ApprovalRequestResult } from './approval-coordinator.ts'
 import {
   RECENT_SESSION_STORAGE_KEY,
@@ -985,9 +986,9 @@ chrome.notifications.onClicked.addListener((notificationId) => {
   const windowId = approvals.windowId(id)
   if (windowId === undefined) return
   clearApprovalNotification(id)
-  // Notification clicks are extension user gestures; both panel APIs require
+  // Notification clicks are extension user gestures; every panel API requires
   // the call to remain inside this handler.
-  openAssistantPanel(windowId)
+  void openAssistantPanel(windowId)
 })
 
 // ---- Tab affinity ----
@@ -1072,28 +1073,12 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 // ---- Boot ----
 
-interface FirefoxSidebarAction {
-  open(): Promise<void> | void
-}
-
-function openAssistantPanel(windowId?: number): void {
-  if (import.meta.env.EXT_TARGET === 'firefox') {
-    const sidebar = (chrome as unknown as { sidebarAction?: FirefoxSidebarAction }).sidebarAction
-    if (sidebar === undefined) return
-    void Promise.resolve(sidebar.open()).catch(() => {})
-    return
-  }
-  if (windowId !== undefined) void chrome.sidePanel.open({ windowId }).catch(() => {})
-}
-
-// Open the side panel when the toolbar icon is clicked.
-// Chrome 116+ uses chrome.sidePanel; Firefox has no sidePanel API, so the
-// action click opens the sidebar via sidebarAction.open() (user gesture).
-if (import.meta.env.EXT_TARGET === 'firefox') {
-  chrome.action.onClicked.addListener(() => { openAssistantPanel() })
-} else {
-  void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {})
-}
+// Open the panel when the toolbar icon is clicked. Chrome opens its side panel
+// itself; Firefox and Opera deliver action.onClicked instead, so the listener is
+// registered for every build and openAssistantPanel picks the host at runtime.
+preferPanelOnActionClick()
+chrome.action.onClicked.addListener((tab) => { void openAssistantPanel(tab.windowId) })
+chrome.windows.onRemoved.addListener((windowId) => { forgetPanelWindow(windowId) })
 
 // Alarms survive some extension/service-worker restarts. Remove any stale
 // schedule left by an older eager-connection build; onConnect re-arms it.

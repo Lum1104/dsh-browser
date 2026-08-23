@@ -1514,6 +1514,13 @@ textarea:focus-visible {
   scrollbar-gutter: stable;
 }
 
+/* Settings cards set overflow:hidden, which resolves their flex min-height to
+   zero and lets a short window compress them instead of scrolling. Holding
+   their natural height keeps "Save & Connect" reachable at any height. */
+.settings > * {
+  flex-shrink: 0;
+}
+
 .settings-heading {
   display: flex;
   align-items: center;

@@ -142,6 +142,10 @@ Chrome 本机使用无需配置；Firefox 需要填写上述本地桥 token。�
 - 确认桥接已加载：浏览器打开 `http://127.0.0.1:3080/ext/bridge-config`，应返回类似 `{"wsUrl":"ws://127.0.0.1:3080/ext/bridge"}` 的 JSON。如果返回的是网页而不是 JSON，说明当前运行的 dsh 早于桥接注册——重启 dsh 并刷新页面即可，扩展会自动重连。
 - 扩展会自动探测 3080/3081/3090/14389 端口。若 dsh 运行在其它端口，或使用 `--host 0.0.0.0` 远程部署，请在面板设置中填写地址与桥接 token。Firefox 始终需要 token。
 
+**点击工具栏图标没有反应**
+
+扩展会在运行时选择面板载体：Chrome 116+ 使用原生侧边面板；Firefox 和 Opera 使用侧栏，由 `sidebar_action` manifest 键完成停靠；其他 Chromium 浏览器则打开一个窄弹出窗口。在 Opera 上，面板还会作为独立图标出现在左侧栏。如果完全没有反应，请查看扩展 service worker 控制台中失败的调用。
+
 ## 开发
 
 桥接插件和 Chrome/Firefox 扩展都属于本仓库 workspace；所有命令均在本仓库根目录执行。首次开发安装运行 `pnpm install`。

@@ -142,6 +142,10 @@ Local Chrome use requires no configuration; Firefox requires the local bridge to
 - Verify the bridge is loaded: open `http://127.0.0.1:3080/ext/bridge-config`. It should return JSON such as `{"wsUrl":"ws://127.0.0.1:3080/ext/bridge"}`. If it returns a web page instead of JSON, the running dsh predates the bridge registration — restart dsh and refresh the page; the extension reconnects on its own.
 - The extension probes ports 3080, 3081, 3090, and 14389 automatically. If dsh runs on another port — or you use a remote `--host 0.0.0.0` deployment — set the address (and bridge token) in the panel settings. Firefox always requires the token.
 
+**Clicking the toolbar icon does nothing**
+
+The extension picks its panel host at runtime. Chrome 116+ uses the native side panel; Firefox and Opera use the sidebar, which they dock from the `sidebar_action` manifest key; any other Chromium browser gets a narrow popup window. On Opera the panel also appears as its own icon in the left sidebar. If nothing opens at all, check the extension's service-worker console for the failing call.
+
 ## Development
 
 The bridge plugin and Chrome/Firefox extension are both members of this repository's workspace. Run all commands from the repository root. For the first development installation, run `pnpm install`.

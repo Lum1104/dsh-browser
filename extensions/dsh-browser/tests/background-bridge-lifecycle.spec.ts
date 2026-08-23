@@ -65,6 +65,9 @@ function mockChrome(options: {
   }
   vi.stubGlobal('chrome', {
     alarms,
+    action: {
+      onClicked: chromeEvent<[chrome.tabs.Tab]>(),
+    },
     notifications: {
       create: vi.fn(async () => ''),
       clear: vi.fn(async () => true),
@@ -101,6 +104,7 @@ function mockChrome(options: {
     windows: {
       WINDOW_ID_NONE: -1,
       onFocusChanged: chromeEvent<[number]>(),
+      onRemoved: chromeEvent<[number]>(),
     },
   } as unknown as typeof chrome)
   return { alarms, onConnect }

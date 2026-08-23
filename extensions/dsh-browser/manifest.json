@@ -33,6 +33,16 @@
   "side_panel": {
     "default_path": "panel/index.html"
   },
+  "sidebar_action": {
+    "default_title": "__MSG_actionTitle__",
+    "default_panel": "panel/index.html",
+    "open_at_install": false,
+    "default_icon": {
+      "16": "assets/icons/icon16.png",
+      "32": "assets/icons/icon32.png",
+      "48": "assets/icons/icon48.png"
+    }
+  },
   "content_scripts": [
     {
       "matches": [
