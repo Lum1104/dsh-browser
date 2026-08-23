@@ -27,6 +27,14 @@ interface SidePanelApi {
   open: (options: { windowId: number }) => Promise<void>
 }
 
+/**
+ * Session storage outlives a service-worker restart and dies with the browser
+ * session, which is exactly the lifetime of the window it names. Without it an
+ * MV3 restart forgets a popup that is still open, and the next toolbar click
+ * opens a second one.
+ */
+const PANEL_WINDOW_STORAGE_KEY = 'dshPanelWindow'
+
 /** The remembered fallback window, so a second click focuses it rather than stacking a duplicate. */
 let panelWindowId: number | undefined
 /**
@@ -36,6 +44,29 @@ let panelWindowId: number | undefined
  * before there is an id to claim it by.
  */
 let panelWindowOpening: Promise<void> | null = null
+
+/** Rehydrate the remembered window before the first open decides anything. */
+const panelWindowReady: Promise<void> = (async () => {
+  try {
+    const stored = await chrome.storage.session.get(PANEL_WINDOW_STORAGE_KEY)
+    const id: unknown = stored[PANEL_WINDOW_STORAGE_KEY]
+    if (typeof id === 'number' && Number.isInteger(id) && id >= 0) panelWindowId = id
+  } catch {
+    // A forgotten id costs a duplicate popup, not correctness.
+  }
+})()
+
+function rememberPanelWindow(windowId: number | undefined): void {
+  panelWindowId = windowId
+  try {
+    void (windowId === undefined
+      ? chrome.storage.session.remove(PANEL_WINDOW_STORAGE_KEY)
+      : chrome.storage.session.set({ [PANEL_WINDOW_STORAGE_KEY]: windowId })
+    ).catch(() => {})
+  } catch {
+    // Same as above: persistence here is a convenience, not a guarantee.
+  }
+}
 
 function sidePanelApi(): SidePanelApi | undefined {
   const api = (chrome as { sidePanel?: SidePanelApi }).sidePanel
@@ -77,13 +108,15 @@ async function openPanelWindow(): Promise<void> {
 }
 
 async function focusOrCreatePanelWindow(): Promise<void> {
+  // A popup from before a service-worker restart is still open and still ours.
+  await panelWindowReady
   if (panelWindowId !== undefined) {
     const focused = await chrome.windows.update(panelWindowId, { focused: true })
       .then(() => true)
       .catch(() => false)
     if (focused) return
     // The user closed it; fall through and open a replacement.
-    panelWindowId = undefined
+    rememberPanelWindow(undefined)
   }
   try {
     const created = await chrome.windows.create({
@@ -92,10 +125,10 @@ async function focusOrCreatePanelWindow(): Promise<void> {
       width: PANEL_WINDOW_WIDTH,
       height: PANEL_WINDOW_HEIGHT,
     })
-    panelWindowId = created?.id
+    rememberPanelWindow(created?.id)
   } catch {
     // Every caller shares this promise, so a failed open must not reject onto them.
-    panelWindowId = undefined
+    rememberPanelWindow(undefined)
   }
 }
 
@@ -115,7 +148,7 @@ export function hasPanelWindow(): boolean {
  * arriving mid-open cannot be judged until this settles.
  */
 export function panelWindowSettled(): Promise<void> {
-  return panelWindowOpening ?? Promise.resolve()
+  return panelWindowOpening ?? panelWindowReady
 }
 
 /** Whether a window is the panel's own popup rather than a browser window. */
@@ -164,5 +197,5 @@ export async function openAssistantPanel(windowId?: number): Promise<void> {
 
 /** Forget the remembered window so the next open creates a fresh one. */
 export function forgetPanelWindow(windowId: number): void {
-  if (panelWindowId === windowId) panelWindowId = undefined
+  if (panelWindowId === windowId) rememberPanelWindow(undefined)
 }

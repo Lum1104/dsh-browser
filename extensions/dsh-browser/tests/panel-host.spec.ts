@@ -9,15 +9,36 @@ interface ChromeStub {
   }
   sidebarAction?: { open?: () => Promise<void> | void }
   runtime: { getURL: (path: string) => string }
+  storage: {
+    session: {
+      get: (key: string) => Promise<Record<string, unknown>>
+      set: (items: Record<string, unknown>) => Promise<void>
+      remove: (key: string) => Promise<void>
+    }
+  }
   windows: {
     create: (options: Record<string, unknown>) => Promise<{ id?: number }>
     update: (windowId: number, options: Record<string, unknown>) => Promise<unknown>
   }
 }
 
+/** Stands in for chrome.storage.session, which survives a service-worker restart. */
+function sessionStore(seed: Record<string, unknown> = {}) {
+  const data = { ...seed }
+  return {
+    data,
+    session: {
+      get: vi.fn(async (key: string) => (key in data ? { [key]: data[key] } : {})),
+      set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(data, items) }),
+      remove: vi.fn(async (key: string) => { delete data[key] }),
+    },
+  }
+}
+
 function stubChrome(overrides: Partial<ChromeStub> = {}): ChromeStub {
   const chromeStub: ChromeStub = {
     runtime: { getURL: (path) => `chrome-extension://test-id/${path}` },
+    storage: sessionStore(),
     windows: {
       create: vi.fn(async () => ({ id: 7 })),
       update: vi.fn(async () => ({})),
@@ -112,9 +133,80 @@ describe('panel host selection', () => {
 
     const first = openAssistantPanel()
     const second = openAssistantPanel()
+    // The remembered id is rehydrated before create() is reached, so wait for
+    // the call rather than assuming it has already happened.
+    await vi.waitFor(() => { expect(chromeStub.windows.create).toHaveBeenCalled() })
     resolveCreate({ id: 7 })
     await Promise.all([first, second])
 
+    expect(chromeStub.windows.create).toHaveBeenCalledOnce()
+  })
+
+  it('focuses the popup left open by a restarted service worker', async () => {
+    // MV3 restarts the worker while the popup stays open, wiping module state.
+    const store = sessionStore({ dshPanelWindow: 7 })
+    const chromeStub = stubChrome({ storage: { session: store.session } })
+    const { openAssistantPanel } = await loadPanelHost()
+
+    await openAssistantPanel()
+
+    expect(chromeStub.windows.update).toHaveBeenCalledWith(7, { focused: true })
+    expect(chromeStub.windows.create).not.toHaveBeenCalled()
+  })
+
+  it('recognizes the restored window so affinity keeps skipping it', async () => {
+    const store = sessionStore({ dshPanelWindow: 7 })
+    stubChrome({ storage: { session: store.session } })
+    const { panelWindowSettled, isPanelWindow, hasPanelWindow } = await loadPanelHost()
+
+    await panelWindowSettled()
+
+    expect(hasPanelWindow()).toBe(true)
+    expect(isPanelWindow(7)).toBe(true)
+  })
+
+  it('persists the window it opens and clears it when the user closes it', async () => {
+    const store = sessionStore()
+    stubChrome({ storage: { session: store.session } })
+    const { openAssistantPanel, forgetPanelWindow } = await loadPanelHost()
+
+    await openAssistantPanel()
+    expect(store.data.dshPanelWindow).toBe(7)
+
+    forgetPanelWindow(7)
+    await vi.waitFor(() => { expect(store.data.dshPanelWindow).toBeUndefined() })
+  })
+
+  it('opens a fresh popup when the remembered one is already gone', async () => {
+    const store = sessionStore({ dshPanelWindow: 7 })
+    const chromeStub = stubChrome({
+      storage: { session: store.session },
+      windows: {
+        create: vi.fn(async () => ({ id: 8 })),
+        update: vi.fn(async () => { throw new Error('No window with id: 7.') }),
+      },
+    })
+    const { openAssistantPanel } = await loadPanelHost()
+
+    await openAssistantPanel()
+
+    expect(chromeStub.windows.create).toHaveBeenCalledOnce()
+    expect(store.data.dshPanelWindow).toBe(8)
+  })
+
+  it('survives session storage being unavailable', async () => {
+    const chromeStub = stubChrome({
+      storage: {
+        session: {
+          get: vi.fn(async () => { throw new Error('no storage') }),
+          set: vi.fn(async () => { throw new Error('no storage') }),
+          remove: vi.fn(async () => { throw new Error('no storage') }),
+        },
+      },
+    })
+    const { openAssistantPanel } = await loadPanelHost()
+
+    await expect(openAssistantPanel()).resolves.toBeUndefined()
     expect(chromeStub.windows.create).toHaveBeenCalledOnce()
   })
 
@@ -169,7 +261,7 @@ describe('panel host selection', () => {
     // The browser focuses the new window before create() resolves, so a
     // window-id check alone would miss the very first focus event.
     let resolveCreate: (value: { id: number }) => void = () => {}
-    stubChrome({
+    const chromeStub = stubChrome({
       windows: {
         create: vi.fn(() => new Promise<{ id: number }>((resolve) => { resolveCreate = resolve })),
         update: vi.fn(async () => ({})),
@@ -180,6 +272,7 @@ describe('panel host selection', () => {
     const opening = openAssistantPanel()
     expect(hasPanelWindow()).toBe(true)
 
+    await vi.waitFor(() => { expect(chromeStub.windows.create).toHaveBeenCalled() })
     resolveCreate({ id: 7 })
     await opening
     expect(hasPanelWindow()).toBe(true)
