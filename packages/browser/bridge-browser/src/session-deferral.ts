@@ -9,6 +9,11 @@
  * the first `session.prompt` for that id. Abandoned provisional ids are
  * pruned after {@link PROVISIONAL_TTL_MS}.
  *
+ * Agent-preset selection is deferred with it. A preset may only be chosen
+ * while a session is blank, which for this surface is exactly the provisional
+ * window: the gateway has no session to recompose yet, so `agentPreset.select`
+ * is recorded into the pending create payload and applied at materialization.
+ *
  * @module @yuxianglin/dsh-bridge-browser/src/session-deferral
  */
 
@@ -24,9 +29,10 @@ const PROVISIONAL_TTL_MS = 30 * 60_000
 type CreateRequest = Parameters<ApiProxy['sessions']['create']>[0]
 type HistoryRequest = Parameters<ApiProxy['sessions']['history']>[0]
 type PromptRequest = Parameters<ApiProxy['sessions']['prompt']>[0]
+type PresetSelectRequest = Parameters<ApiProxy['agentPresets']['select']>[0]
 
 interface ProvisionalEntry {
-  /** The original create payload, replayed at materialization (keeps cwd/workspaceId). */
+  /** The original create payload, replayed at materialization (keeps cwd/workspaceId/agentPreset). */
   payload: CreateRequest['payload']
   createdAt: number
 }
@@ -64,13 +70,37 @@ export function withSessionDeferral(
 
   return {
     ...api,
+    agentPresets: {
+      ...api.agentPresets,
+      async select(request: PresetSelectRequest) {
+        const entry = provisional.get(request.payload.sessionId)
+        if (entry === undefined) return api.agentPresets.select(request)
+        // The gateway has nothing to recompose yet. Record the choice on the
+        // pending create payload so materialization composes the agent from
+        // it — the same outcome `select` would produce on a blank session.
+        entry.payload = { ...entry.payload, agentPreset: request.payload.agentPreset }
+        return {
+          rpcId: request.rpcId,
+          result: { ok: true, value: { agentPreset: request.payload.agentPreset } },
+        }
+      },
+    },
     sessions: {
       ...api.sessions,
       async create(request: CreateRequest) {
         prune()
         const sessionId = mintedId(request.payload)
         provisional.set(sessionId, { payload: { ...request.payload }, createdAt: Date.now() })
-        return { rpcId: request.rpcId, result: { ok: true, value: { sessionId } } }
+        return {
+          rpcId: request.rpcId,
+          result: {
+            ok: true,
+            value: {
+              sessionId,
+              ...(request.payload.agentPreset === undefined ? {} : { agentPreset: request.payload.agentPreset }),
+            },
+          },
+        }
       },
       async history(request: HistoryRequest) {
         if (!provisional.has(request.payload.sessionId)) return api.sessions.history(request)

@@ -69,6 +69,29 @@ export function isLoopbackAddress(address: string | undefined): boolean {
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'
 }
 
+/**
+ * Extension-context Origin schemes accepted for the token-free loopback path.
+ *
+ * Chromium-based browsers all serve extensions from `chrome-extension://`,
+ * Edge and Chrome included — the scheme is part of the extension platform, not
+ * the brand. `extension://` and `moz-extension://` are listed because a fork
+ * that renames the scheme would otherwise fail with a bad-token close and no
+ * hint as to why, and neither scheme is reachable from web content: a page
+ * cannot set the Origin header, so widening it grants nothing to a page.
+ */
+const EXTENSION_ORIGIN_SCHEMES = ['chrome-extension://', 'extension://', 'moz-extension://', 'safari-web-extension://']
+
+/**
+ * Whether this Origin identifies a browser-extension context.
+ * @param origin - the socket's Origin header, when it sent one.
+ * @returns true for an extension origin.
+ */
+export function isExtensionOrigin(origin: string | undefined): boolean {
+  if (typeof origin !== 'string') return false
+  const lower = origin.toLowerCase()
+  return EXTENSION_ORIGIN_SCHEMES.some((scheme) => lower.startsWith(scheme) && lower.length > scheme.length)
+}
+
 /** Error thrown by requestTool; the tool registry turns it into an isError result. */
 export class BridgeToolError extends Error {
   constructor(

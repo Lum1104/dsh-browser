@@ -8,6 +8,7 @@ import { withSessionDeferral } from '../src/session-deferral.ts'
 type CreateRequest = Parameters<ApiProxy['sessions']['create']>[0]
 type HistoryRequest = Parameters<ApiProxy['sessions']['history']>[0]
 type PromptRequest = Parameters<ApiProxy['sessions']['prompt']>[0]
+type PresetSelectRequest = Parameters<ApiProxy['agentPresets']['select']>[0]
 
 const PROMPT = (sessionId: ReturnType<typeof SessionId>, rpcId: string): PromptRequest => ({
   rpcId: RpcId(rpcId),
@@ -27,10 +28,15 @@ function apiHarness() {
     rpcId: request.rpcId,
     result: { ok: true as const, value: { accepted: true } },
   }))
+  const presetSelect = vi.fn(async (request: PresetSelectRequest) => ({
+    rpcId: request.rpcId,
+    result: { ok: true as const, value: { agentPreset: request.payload.agentPreset } },
+  }))
   const api = {
     sessions: { create: sessionCreate, history: sessionHistory, prompt: sessionPrompt },
+    agentPresets: { select: presetSelect },
   } as unknown as ApiProxy
-  return { api, sessionCreate, sessionHistory, sessionPrompt }
+  return { api, sessionCreate, sessionHistory, sessionPrompt, presetSelect }
 }
 
 async function provisionalId(wrapped: ApiProxy, rpcId = 'create-rpc'): Promise<ReturnType<typeof SessionId>> {
@@ -216,5 +222,55 @@ describe('withSessionDeferral', () => {
     const { api } = apiHarness()
 
     expect(withSessionDeferral(api, false)).toBe(api)
+  })
+})
+
+describe('withSessionDeferral: agent presets', () => {
+  it('records a preset chosen on a provisional session and applies it at materialization', async () => {
+    const { api, sessionCreate, presetSelect } = apiHarness()
+    const wrapped = withSessionDeferral(api, true)
+    const sessionId = await provisionalId(wrapped)
+
+    const selected = await wrapped.agentPresets.select({
+      rpcId: RpcId('select-rpc'),
+      payload: { sessionId, agentPreset: 'tavern' },
+    })
+
+    // Nothing exists to recompose yet, so the gateway is not called at all.
+    expect(presetSelect).not.toHaveBeenCalled()
+    expect(selected.result.ok).toBe(true)
+    expect(selected.result.ok && selected.result.value).toEqual({ agentPreset: 'tavern' })
+
+    await wrapped.sessions.prompt(PROMPT(sessionId, 'prompt-rpc'))
+    expect(sessionCreate).toHaveBeenCalledTimes(1)
+    expect(sessionCreate.mock.calls[0]![0].payload).toMatchObject({ sessionId, agentPreset: 'tavern' })
+  })
+
+  it('keeps the last choice when the preset is switched twice before the first message', async () => {
+    const { api, sessionCreate } = apiHarness()
+    const wrapped = withSessionDeferral(api, true)
+    const sessionId = await provisionalId(wrapped)
+
+    await wrapped.agentPresets.select({ rpcId: RpcId('s1'), payload: { sessionId, agentPreset: 'tavern' } })
+    await wrapped.agentPresets.select({ rpcId: RpcId('s2'), payload: { sessionId, agentPreset: 'router-flash' } })
+    await wrapped.sessions.prompt(PROMPT(sessionId, 'prompt-rpc'))
+
+    expect(sessionCreate.mock.calls[0]![0].payload).toMatchObject({ agentPreset: 'router-flash' })
+  })
+
+  it('passes a real session straight through to the gateway', async () => {
+    const { api, presetSelect } = apiHarness()
+    const wrapped = withSessionDeferral(api, true)
+    const request = { rpcId: RpcId('select-rpc'), payload: { sessionId: SessionId('session-real'), agentPreset: 'standard' } }
+
+    await wrapped.agentPresets.select(request)
+    expect(presetSelect).toHaveBeenCalledWith(request)
+  })
+
+  it('echoes a preset supplied at create time', async () => {
+    const { api } = apiHarness()
+    const wrapped = withSessionDeferral(api, true)
+    const created = await wrapped.sessions.create({ rpcId: RpcId('create-rpc'), payload: { agentPreset: 'minimal' } })
+    expect(created.result.ok && created.result.value).toMatchObject({ agentPreset: 'minimal' })
   })
 })

@@ -39,6 +39,7 @@ describe('attaching a page selection in the composer', () => {
     vi.stubGlobal('chrome', {
       storage: { local: { get: vi.fn(async () => ({ dshSettings: { autoResumeSession: false } })) } },
       windows: { getCurrent: vi.fn(async () => ({ id: 1 })) },
+      permissions: { contains: vi.fn(async () => false) },
     })
 
     rpc = vi.fn(async (method: string) => {
@@ -58,6 +59,8 @@ describe('attaching a page selection in the composer', () => {
       onTabAffinity: vi.fn(() => unsubscribe),
       onSelection: vi.fn((callback) => { onSelection = callback; return unsubscribe }),
       onSessionResumeHint: vi.fn((callback) => { onResumeHint = callback; return unsubscribe }),
+      onPermissionRequest: vi.fn(() => unsubscribe),
+      respondToPermission: vi.fn(async () => {}),
       respondToApproval: vi.fn(async () => {}),
       resolveTabAffinity: vi.fn(async () => {}),
       rebindTabAffinity: vi.fn(async () => {}),

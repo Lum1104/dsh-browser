@@ -13,7 +13,11 @@
     "scripting",
     "webNavigation",
     "alarms",
-    "notifications"
+    "notifications",
+    "downloads"
+  ],
+  "optional_permissions": [
+    "debugger"
   ],
   "host_permissions": [
     "http://*/*",

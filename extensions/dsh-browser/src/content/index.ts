@@ -11,13 +11,13 @@
  */
 
 import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import { runAction, ActionError } from './actions.ts'
+import { runAction, ActionError, type ActionResult } from './actions.ts'
 import { ElementIds } from './ids.ts'
 import { SelectionWatcher } from './selection.ts'
 import type { SnapshotBudget } from './snapshot.ts'
 
 /** Negotiated snapshot budgets, patched in from the background via message. */
-let budget: SnapshotBudget = { maxItems: 60, maxForms: 30, maxChars: DEFAULT_SNAPSHOT_MAX_CHARS }
+let budget: SnapshotBudget = { maxItems: 200, maxForms: 100, maxChars: DEFAULT_SNAPSHOT_MAX_CHARS }
 
 const ids = new ElementIds()
 
@@ -32,7 +32,7 @@ type ContentListener = typeof onMessage
 /** A tool-call result for the bridge. */
 export interface ToolResult {
   ok: boolean
-  result?: { text: string; pageContent?: string; navigationPending?: boolean }
+  result?: ActionResult
   error?: { code: string; message: string }
 }
 

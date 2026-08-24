@@ -73,6 +73,8 @@ export interface PanelCopy {
     approvalNotificationsHelp: string
     autoResumeSession: string
     autoResumeSessionHelp: string
+    autoApproveActions: string
+    autoApproveActionsHelp: string
     trustedOrigins: string
     trustedOriginsHelp: string
     trustedOriginInput: string
@@ -195,6 +197,40 @@ export interface PanelCopy {
     selectionTruncated: string
     removeSelection: string
   }
+  permission: {
+    eyebrow: string
+    title: string
+    body: string
+    reassurance: string
+    allow: string
+    deny: string
+    settingLabel: string
+    settingHelp: string
+    granted: string
+    revoke: string
+    grant: string
+    failed: string
+  }
+  presets: {
+    eyebrow: string
+    open: string
+    loading: string
+    empty: string
+    unknown: string
+    current: (label: string) => string
+    switching: string
+    switched: (label: string) => string
+    system: string
+    user: string
+    defaultBadge: string
+    brokenBadge: string
+    lockedTitle: (label: string) => string
+    lockedBody: string
+    lockedAction: (label: string) => string
+    lockedDismiss: string
+    missing: string
+    failed: (reason: string) => string
+  }
 }
 
 const EN: PanelCopy = {
@@ -237,6 +273,20 @@ const EN: PanelCopy = {
       browser_reload: 'Reload page',
       browser_get_text: 'Extract text',
       browser_wait: 'Wait for page',
+      browser_find: 'Find on page',
+      browser_act: 'Run page steps',
+      browser_select_option: 'Choose option',
+      browser_hover: 'Hover element',
+      browser_screenshot: 'Capture page',
+      browser_read_image: 'Read image',
+      browser_tabs: 'Manage tabs',
+      browser_expand: 'Expand page',
+      browser_search: 'Search the web',
+      browser_read_pages: 'Read pages',
+      browser_download: 'Download files',
+      browser_downloads: 'Manage downloads',
+      browser_verify: 'Human verification',
+      browser_inspect: 'Read console and network',
     },
     overflow: (shown, total) => `${shown.join(' → ')} → ${total - shown.length} more`,
   },
@@ -284,6 +334,8 @@ const EN: PanelCopy = {
     sharingOff: 'Off',
     approvalNotifications: 'Browser approval notifications',
     approvalNotificationsHelp: 'Notify you when an approval arrives while the side panel is closed',
+    autoApproveActions: 'Run without asking',
+    autoApproveActionsHelp: 'Let the assistant click, type, search, download, and verify without a confirmation dialog. Turn this off to approve each action and to use the trusted-site list below.',
     autoResumeSession: 'Resume the last conversation',
     autoResumeSessionHelp: 'Reopen the most recently active browser conversation instead of starting over',
     trustedOrigins: 'Always-allowed domains',
@@ -408,6 +460,40 @@ const EN: PanelCopy = {
     selectionTruncated: '(truncated)',
     removeSelection: 'Remove the selected text',
   },
+  permission: {
+    eyebrow: 'Extra permission',
+    title: 'Allow real mouse clicks for human verification?',
+    body: 'A "verify you are human" widget ignores simulated clicks on purpose. Delivering a real one needs Chrome’s debugging permission, and Chrome shows a banner on the tab while it is attached.',
+    reassurance: 'It is attached only for that single click and detached immediately. You can revoke it any time in Settings.',
+    allow: 'Allow',
+    deny: 'Not now',
+    settingLabel: 'Human-verification help',
+    settingHelp: 'Lets the assistant click a Cloudflare, hCaptcha, or reCAPTCHA checkbox with a real mouse event. Chrome shows a debugging banner for the duration of each click.',
+    granted: 'Granted',
+    revoke: 'Revoke',
+    grant: 'Grant',
+    failed: 'Chrome refused the permission request.',
+  },
+  presets: {
+    eyebrow: 'Agent preset',
+    open: 'Change the agent preset',
+    loading: 'Loading presets…',
+    empty: 'This dsh deployment offers no agent presets.',
+    unknown: 'Deployment default',
+    current: (label) => `Preset: ${label}`,
+    switching: 'Switching preset…',
+    switched: (label) => `This conversation now runs on ${label}.`,
+    system: 'Built in',
+    user: 'Yours',
+    defaultBadge: 'Default',
+    brokenBadge: 'Unusable',
+    lockedTitle: (label) => `This conversation cannot switch to ${label}`,
+    lockedBody: 'A preset decides which tools the agent has, so it can only be chosen before the first message.',
+    lockedAction: (label) => `New conversation on ${label}`,
+    lockedDismiss: 'Keep current preset',
+    missing: 'That preset no longer exists. The list has been refreshed.',
+    failed: (reason) => `Could not switch preset (${reason}).`,
+  },
 }
 
 const ZH: PanelCopy = {
@@ -450,6 +536,20 @@ const ZH: PanelCopy = {
       browser_reload: '刷新页面',
       browser_get_text: '提取文字',
       browser_wait: '等待页面',
+      browser_find: '页面查找',
+      browser_act: '连续操作',
+      browser_select_option: '选择下拉项',
+      browser_hover: '悬停元素',
+      browser_screenshot: '截取页面',
+      browser_read_image: '读取图片',
+      browser_tabs: '管理标签页',
+      browser_expand: '展开页面',
+      browser_search: '联网搜索',
+      browser_read_pages: '批量读取网页',
+      browser_download: '下载文件',
+      browser_downloads: '管理下载',
+      browser_verify: '人机验证',
+      browser_inspect: '读取控制台与网络',
     },
     overflow: (shown, total) => `${shown.join(' → ')} 等${total}个工具`,
   },
@@ -497,6 +597,8 @@ const ZH: PanelCopy = {
     sharingOff: '关闭',
     approvalNotifications: '浏览器审批通知',
     approvalNotificationsHelp: '侧栏关闭时收到审批请求，通过系统通知提醒你',
+    autoApproveActions: '免确认执行',
+    autoApproveActionsHelp: '让助手直接点击、输入、搜索、下载和过人机验证，不再弹确认框。关闭后每个操作都会询问，并启用下方的受信任站点列表。',
     autoResumeSession: '续接上次会话',
     autoResumeSessionHelp: '重新打开最近活跃的浏览器会话，而不是从新会话开始',
     trustedOrigins: '永久免确认域名',
@@ -620,6 +722,40 @@ const ZH: PanelCopy = {
     selectionAttached: '选中的网页内容',
     selectionTruncated: '（已截断）',
     removeSelection: '移除选中内容',
+  },
+  permission: {
+    eyebrow: '额外权限',
+    title: '允许用真实鼠标点击完成人机验证？',
+    body: '「验证你是人类」控件会故意忽略模拟点击。要发出真实点击需要 Chrome 的调试权限，挂载期间 Chrome 会在该标签页上显示提示条。',
+    reassurance: '只在那一次点击期间挂载，点完立即断开。你可以随时在设置里撤销。',
+    allow: '允许',
+    deny: '暂不',
+    settingLabel: '人机验证辅助',
+    settingHelp: '允许助手用真实鼠标事件点击 Cloudflare、hCaptcha 或 reCAPTCHA 的复选框。每次点击期间 Chrome 会显示调试提示条。',
+    granted: '已授权',
+    revoke: '撤销',
+    grant: '授权',
+    failed: 'Chrome 拒绝了该权限请求。',
+  },
+  presets: {
+    eyebrow: '代理预设',
+    open: '切换代理预设',
+    loading: '正在读取预设…',
+    empty: '当前 dsh 部署没有可用的代理预设。',
+    unknown: '部署默认',
+    current: (label) => `预设：${label}`,
+    switching: '正在切换预设…',
+    switched: (label) => `本会话已切换到「${label}」。`,
+    system: '内置',
+    user: '自建',
+    defaultBadge: '默认',
+    brokenBadge: '不可用',
+    lockedTitle: (label) => `当前会话无法切换到「${label}」`,
+    lockedBody: '预设决定了 Agent 拥有哪些工具，因此只能在发出第一条消息之前选择。',
+    lockedAction: (label) => `用「${label}」新建会话`,
+    lockedDismiss: '保持当前预设',
+    missing: '该预设已不存在，列表已刷新。',
+    failed: (reason) => `切换预设失败（${reason}）。`,
   },
 }
 

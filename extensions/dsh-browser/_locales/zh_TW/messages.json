@@ -3,7 +3,7 @@
     "message": "dsh 瀏覽器助手"
   },
   "extensionDescription": {
-    "message": "讓 dsh 無需視覺能力即可直接讀取並操作瀏覽器的 Chrome 側邊欄擴充功能。"
+    "message": "讓 dsh 直接讀取、操作、搜尋並擷取瀏覽器內容的側邊欄擴充功能，適用於 Chromium 瀏覽器（Chrome、Edge）。"
   },
   "actionTitle": {
     "message": "開啟 dsh 瀏覽器助手"

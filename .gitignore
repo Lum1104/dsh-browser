@@ -5,3 +5,6 @@ node_modules/
 !benchmark/lib/**
 **/dist/
 **/dist-firefox/
+
+# dsh-browser one-command installer marker (local only)
+.managed-by-install-sh

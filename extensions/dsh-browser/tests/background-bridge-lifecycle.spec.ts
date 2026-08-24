@@ -230,4 +230,39 @@ describe('background bridge lifecycle', () => {
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(2) })
     expect(FakeWebSocket.instances[1]!.url).toBe('ws://127.0.0.1:3081/ext/bridge')
   })
+
+  it('persists the frictionless default, so a fresh profile never prompts per action', async () => {
+    const written: Record<string, unknown>[] = []
+    const chromeMock = mockChrome({ localSet: async (items) => { written.push(items) } })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 503 })))
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    // A settings save with the field absent must still land as enabled: the
+    // default lives in normalizeSettings, not only in the panel form.
+    panel.onMessage.emit({ type: 'settings', settings: { sharePageContent: 'auto' } })
+
+    await vi.waitFor(() => { expect(written.length).toBeGreaterThan(0) })
+    const stored = written[0]!.dshSettings as { autoApproveActions?: unknown; sharePageContent?: unknown }
+    expect(stored.autoApproveActions).toBe(true)
+    expect(stored.sharePageContent).toBe('auto')
+  })
+
+  it('honors an explicit opt-out of the frictionless default', async () => {
+    const written: Record<string, unknown>[] = []
+    const chromeMock = mockChrome({ localSet: async (items) => { written.push(items) } })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 503 })))
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    panel.onMessage.emit({ type: 'settings', settings: { autoApproveActions: false } })
+
+    await vi.waitFor(() => { expect(written.length).toBeGreaterThan(0) })
+    expect((written[0]!.dshSettings as { autoApproveActions?: unknown }).autoApproveActions).toBe(false)
+  })
+
 })

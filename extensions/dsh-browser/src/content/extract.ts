@@ -128,6 +128,13 @@ export function accessibleName(el: Element): string {
     return truncate(clean(el.type), MAX_ITEM_NAME_CHARS).text
   }
 
+  // `alt` is an image's primary accessible name; without this an <img> named
+  // itself "img" in every inventory, which told a reader nothing.
+  const alt = el.getAttribute('alt')
+  if (alt !== null && alt.trim() !== '') return truncate(clean(alt), MAX_ITEM_NAME_CHARS).text
+  const title = el.getAttribute('title')
+  if (title !== null && title.trim() !== '') return truncate(clean(title), MAX_ITEM_NAME_CHARS).text
+
   return el.tagName.toLowerCase()
 }
 

@@ -40,7 +40,7 @@ describe('assertPositiveInteger', () => {
 })
 
 /** Valid budgets (the Loader applies schema defaults; hand-built tests pass them explicitly). */
-const VALID = { toolTimeoutMs: 90_000, snapshotMaxChars: 32_000, maxInteractiveItems: 60 }
+const VALID = { toolTimeoutMs: 90_000, snapshotMaxChars: 96_000, maxInteractiveItems: 200, maxBatchSteps: 8, imageCapture: true }
 
 describe('config', () => {
   it('resolves defaults, including an enabled workspace under the dsh home', () => {
@@ -60,6 +60,8 @@ describe('config', () => {
       maxInteractiveItems: 3,
       sessionWorkspacePath: '',
       deferSessionCreate: false,
+      maxBatchSteps: 2,
+      imageCapture: false,
     })).toEqual({
       token: 'fixed',
       toolTimeoutMs: 1,
@@ -67,6 +69,8 @@ describe('config', () => {
       maxInteractiveItems: 3,
       sessionWorkspacePath: '',
       deferSessionCreate: false,
+      maxBatchSteps: 2,
+      imageCapture: false,
     })
     expect(new Config({ sessionWorkspacePath: '' }).sessionWorkspacePath).toBe('')
   })

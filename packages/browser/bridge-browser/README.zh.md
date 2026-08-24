@@ -2,9 +2,9 @@
 
 [English](README.md) | 中文
 
-dsh 的**浏览器操作桥**：在宿主 webserver 上挂载一个 **token 认证的 WebSocket 通道**（`/ext/bridge`），供 Chrome 扩展连接；通过 `/api` 同款 fetch handler 代理网关 RPC、按连接泵送会话事件，并注册**纯文本**的 `browser_*` 工具集——经扩展在真实浏览器中读取页面、点击元素、填写表单、滚动与导航，登录态保留。侧边栏是对话入口，工具才是产品本体。
+dsh 的**浏览器操作桥**：在宿主 webserver 上挂载一个 **token 认证的 WebSocket 通道**（`/ext/bridge`），供 Chrome 扩展连接；通过 `/api` 同款 fetch handler 代理网关 RPC、按连接泵送会话事件，并注册 `browser_*` 工具集——经扩展在真实浏览器中读取页面、定位与点击元素、填写表单、批量执行流程、滚动、导航、管理标签页，并按需截取页面图像，登录态保留。侧边栏是对话入口，工具才是产品本体。
 
-**纯文本浏览器工具，多模态对话透传**：页面快照仍是结构化文本（标题、正文、带编号的交互清单、敏感值打码的表单字段），所有浏览器动作按稳定编号寻址。通用 RPC 通道也会透传 dsh 0.1.1 的图片消息和持久附件读取；延迟创建的新会话只在宿主确实挂载附件服务时声明图片限制。
+**页面状态以文本为主，像素按需截取**：页面快照仍是结构化文本（标题、正文、带编号的交互清单、敏感值打码的表单字段），所有浏览器动作按稳定编号寻址；`browser_screenshot` / `browser_read_image` 才会返回真实图像。通用 RPC 通道也会透传 dsh 0.1.1 的图片消息和持久附件读取；延迟创建的新会话只在宿主确实挂载附件服务时声明图片限制。
 
 ## 配置
 
@@ -69,14 +69,28 @@ npx @deepseek-ai/dsh web
 | `browser_snapshot` | 结构化文本快照（标题/URL/正文/清单/表单）；`delta: true` 只返回变化。 |
 | `browser_click` / `browser_type` / `browser_press` | 按稳定编号操作清单元素。 |
 | `browser_scroll` / `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | 页面移动。 |
-| `browser_get_text` / `browser_wait` | 读区域文本 / 稳定检测。 |
+| `browser_get_text` / `browser_wait` | 读区域文本 / 稳定检测；也可阻塞至指定文本或选择器出现、消失。 |
+| `browser_find` | 按文本、可访问名、角色或选择器定位元素并返回可操作编号，无需完整快照。 |
+| `browser_act` | 在一次往返内执行最多 `maxBatchSteps` 个页面操作；遇首个失败或导航步骤即停止。 |
+| `browser_select_option` / `browser_hover` | 按选项文本或 value 选择下拉项；指针悬停触发菜单与提示。 |
+| `browser_tabs` | 列出标签页、新开 URL、切换浏览器控制权或关闭标签页，按「操作」走审批。 |
+| `browser_expand` | 在读取页面前展开折叠内容与懒加载内容。 |
+| `browser_search` / `browser_read_pages` | 在**后台标签页**中主动取信息：搜索结果链接，或一次汇总最多 8 个页面。全程不导航受控标签页；一次审批列出全部目标 origin。 |
+| `browser_download` / `browser_downloads` | 由扩展作为发起方调用 `chrome.downloads`，批量下载绕过页面级多文件下载限制。 |
+| `browser_verify` | 对人机验证复选框发出可信点击，需扩展的**可选** `debugger` 权限。 |
+| `browser_screenshot` / `browser_read_image` | 返回真实图像。仅在已挂载 `ctx.attachments` 且 `imageCapture` 开启时注册；每次调用还会验证当前模型路由声明了 `image` 输入，不支持则降级为纯文本。 |
 
 ## 模型体验
 
-- **Token 影响**：一次 `browser_snapshot`（默认 32k 字符）对常见英文文本约为 8–10k token，具体取决于语言和分词器；delta 快照只需零头。系统提示段落引导模型按需快照而非囤积页面文本。
+- **不静默丢信息**：`browser_get_text` 与 `browser_read_pages` 返回的是**窗口**——正文加上 `[showing characters A-B of TOTAL; N remain — continue with <call>]`。任何截断都自带取回剩余部分的方法，模型不必去推断自己没看到什么。`browser_snapshot({ full: true })` 读整个 body，绕开只会挑中单个容器、可能漏掉兄弟节点的主内容启发式。
+- **预算**（插件配置）：`snapshotMaxChars` 96000、`maxInteractiveItems` 200、每页读取 24000（上限 120000）、单次文本窗口 40000（上限 200000）。按大上下文路由标定；小上下文请下调。
+- **Token 影响**：一次 `browser_snapshot`（默认 96k 字符）对常见英文文本约为 25–30k token，具体取决于语言和分词器；delta 快照只需零头。系统提示段落引导模型按需快照而非囤积页面文本。
 - **KV 缓存影响**：无（快照不做服务端缓存）。
 - **延迟**：每次动作等待扩展在真实页面执行 + 稳定检测（通常 0.2–2s；导航最长 5s）。
 - **失败模式**：`bridge-closed`（扩展未连接）、`timeout`、`no-active-tab`、`content-unavailable`（页面需刷新）、`action-failed`（编号过期——模型应重新快照）。
+- **图片**：字节以 base64 随工具结果过线，在 `render` 投影出 `ImageBlock` 之前先提交到 `ctx.attachments`，因此回放同一份记录会解析到同一个引用。扩展会按 `hello.ok` 下发的预算缩放（默认长边 1568px、4 MiB、每次最多 2 张，并受宿主 `imageLimits` 进一步收紧）。无法存储或发送时，降级为该动作的文本状态加一句原因。
+- **代理预设**：`agentPreset.list` 与 `agentPreset.select` 直接透传到网关。由于 `session.create` 被延迟，首条消息之前选定的预设会记录在待创建载荷上，会话真正落地时生效。
+- **主动类工具与授权边界**：搜索、批量读网页和下载访问的是**用户未选择**的 URL，且用的是用户自己的浏览器会话，因此即使完全不碰受控页面，也按「操作」授权——每次调用一个弹窗、列出全部目标 origin，且不提供按 origin 长期免询问的捷径。`browser_verify` 每次都会询问，因为它会在一次真实鼠标事件期间挂载浏览器调试器。
 
 ## 扩展点
 

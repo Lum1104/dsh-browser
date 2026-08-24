@@ -54,6 +54,59 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || fail_pair "$2" "$3"
 }
 
+# Mirror one directory onto another, deleting whatever the source no longer has.
+#
+# rsync is the natural tool and is used when present, but it is absent from a
+# stock Windows/Git Bash install — the platform most likely to run this without
+# a package manager to hand. Node is already a prerequisite, so it carries the
+# fallback rather than adding a dependency.
+#
+# Arguments: SOURCE_DIR DEST_DIR [EXCLUDED_BASENAME...]
+sync_tree() {
+  local source="$1"
+  local dest="$2"
+  shift 2
+  if command -v rsync >/dev/null 2>&1; then
+    local excludes=()
+    local name
+    for name in "$@"; do
+      excludes+=(--exclude "$name")
+    done
+    rsync -a --delete-after "${excludes[@]}" "$source/" "$dest/"
+    return
+  fi
+  node -e '
+    const { cpSync, mkdirSync, readdirSync, rmSync, statSync } = require("node:fs")
+    const { join } = require("node:path")
+    const [source, dest, ...excluded] = process.argv.slice(1)
+    const skip = new Set(excluded)
+    mkdirSync(dest, { recursive: true })
+    for (const entry of readdirSync(source)) {
+      if (skip.has(entry)) continue
+      cpSync(join(source, entry), join(dest, entry), { recursive: true })
+    }
+    // Prune what the source no longer provides, so an update behaves like
+    // rsync --delete instead of accumulating stale files from older builds.
+    const prune = (relative) => {
+      const target = relative === "" ? dest : join(dest, relative)
+      for (const entry of readdirSync(target)) {
+        if (skip.has(entry)) continue
+        const childRelative = relative === "" ? entry : join(relative, entry)
+        const child = join(dest, childRelative)
+        const mirrored = join(source, childRelative)
+        let mirroredExists = true
+        try { statSync(mirrored) } catch { mirroredExists = false }
+        if (!mirroredExists) {
+          rmSync(child, { recursive: true, force: true })
+          continue
+        }
+        if (statSync(child).isDirectory()) prune(childRelative)
+      }
+    }
+    prune("")
+  ' "$source" "$dest" "$@"
+}
+
 is_macos() {
   [ "$(uname -s)" = "Darwin" ]
 }
@@ -256,8 +309,7 @@ bootstrap_remote_install() {
 
   require_command curl "未找到 curl；请先安装 curl。" "curl was not found; install curl first."
   require_command tar "未找到 tar；请先安装 tar。" "tar was not found; install tar first."
-  require_command rsync "未找到 rsync；请先安装 rsync。" "rsync was not found; install rsync first."
-
+  
   if [ -d "$MANAGED_ROOT" ] && [ ! -f "$MANAGED_MARKER" ] && [ -n "$(ls -A "$MANAGED_ROOT" 2>/dev/null)" ]; then
     fail_pair \
       "$MANAGED_ROOT 已存在且不是脚本托管的安装目录；为避免覆盖，请移动该目录或在其中运行 ./scripts/install.sh。" \
@@ -281,10 +333,7 @@ bootstrap_remote_install() {
 
   mkdir -p "$MANAGED_ROOT"
   touch "$MANAGED_MARKER"
-  rsync -a --delete-after \
-    --exclude 'node_modules/' \
-    --exclude '.managed-by-install-sh' \
-    "$source_dir/" "$MANAGED_ROOT/"
+  sync_tree "$source_dir" "$MANAGED_ROOT" 'node_modules' '.managed-by-install-sh'
 
   cleanup_bootstrap
   trap - EXIT HUP INT TERM
@@ -314,21 +363,58 @@ profile_has_dependency() {
   ' "$manifest" "$package_name"
 }
 
+# Convert a path to the form the platform's Node understands. MSYS bash hands
+# out /c/... paths, which node on Windows cannot resolve.
+native_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+# Whether the profile already links this exact plugin directory.
+#
+# Re-registering an already-correct link forces a full dependency resolution in
+# the profile, which fails whenever anything ELSE in that profile cannot be
+# resolved right now (an offline git dependency, say) — turning a no-op step
+# into a failed install. Paths are compared as resolved real paths, because the
+# manifest stores a native path and this script carries a POSIX one.
+profile_links_plugin() {
+  local manifest="$1"
+  local package_name="$2"
+  local expected="$3"
+
+  [ -f "$manifest" ] || return 1
+  node -e '
+    const { realpathSync } = require("node:fs");
+    const [manifest, name, expected] = process.argv.slice(1);
+    const value = (require(manifest).dependencies ?? {})[name];
+    if (typeof value !== "string" || !value.startsWith("link:")) process.exit(1);
+    const resolve = (path) => { try { return realpathSync(path); } catch { return null; } };
+    const current = resolve(value.slice("link:".length));
+    process.exit(current !== null && current === resolve(expected) ? 0 : 1);
+  ' "$manifest" "$package_name" "$expected"
+}
+
 require_command pnpm "未找到 pnpm；请先启用 Corepack 或安装 pnpm。" "pnpm was not found; enable Corepack or install pnpm first."
 require_command node "未找到 Node.js；请先安装受支持的 Node.js 版本。" "Node.js was not found; install a supported Node.js version first."
-require_command rsync "未找到 rsync；请先安装 rsync。" "rsync was not found; install rsync first."
 
 print_step 1 "构建浏览器桥" "Build the browser bridge"
 (cd "$ROOT" && pnpm install --frozen-lockfile >/dev/null 2>&1)
 (cd "$ROOT" && pnpm --filter @yuxianglin/dsh-bridge-browser run build >/dev/null 2>&1)
 
 print_step 2 "注册到本机 web profile" "Register with the local web profile"
-if profile_has_dependency "$WEB_PROFILE_MANIFEST" "$LEGACY_PLUGIN"; then
-  (cd "$ROOT" && pnpm exec dsh plugin --profile web remove "$LEGACY_PLUGIN" >/dev/null)
+if profile_links_plugin "$WEB_PROFILE_MANIFEST" "@yuxianglin/dsh-bridge-browser" "$(native_path "$PLUGIN")"; then
+  print_pair "web profile 已链接到本目录，跳过注册。" "The web profile already links this directory; skipping registration."
+else
+  if profile_has_dependency "$WEB_PROFILE_MANIFEST" "$LEGACY_PLUGIN"; then
+    (cd "$ROOT" && pnpm exec dsh plugin --profile web remove "$LEGACY_PLUGIN" >/dev/null)
+  fi
+  (cd "$ROOT" && pnpm exec dsh plugin --profile web add -w "@yuxianglin/dsh-bridge-browser@link:$PLUGIN" >/dev/null)
 fi
-(cd "$ROOT" && pnpm exec dsh plugin --profile web add -w "@yuxianglin/dsh-bridge-browser@link:$PLUGIN" >/dev/null)
 
-print_step 3 "构建 Chrome 扩展" "Build the Chrome extension"
+print_step 3 "构建浏览器扩展" "Build the browser extension"
 (cd "$ROOT" && pnpm --filter dsh-browser-extension run build >/dev/null 2>&1)
 
 print_step 4 "准备扩展并打开 Chrome" "Prepare the extension and open Chrome"
@@ -340,7 +426,7 @@ else
   IS_UPDATE=0
 fi
 mkdir -p "$DIST_DIR"
-rsync -a --delete-after "$EXT/dist/" "$DIST_DIR/"
+sync_tree "$EXT/dist" "$DIST_DIR" 'install-info.json'
 if [ -f "$ROOT/.managed-by-install-sh" ]; then
   INSTALL_MODE="managed"
 else

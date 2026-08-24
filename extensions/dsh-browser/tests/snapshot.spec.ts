@@ -122,7 +122,8 @@ describe('buildSnapshot', () => {
     document.body.innerHTML = `<article><p>${'长'.repeat(5_000)}</p></article>`
     const ids = new ElementIds()
     const view = buildSnapshot(ids, { budget: { ...BUDGET, maxChars: 2_000 }, delta: false, region: undefined }, null)
-    expect(view.main.length).toBeLessThanOrEqual(1_001)
+    // Main text gets 60% of the character budget; `full` raises it to 80%.
+    expect(view.main.length).toBeLessThanOrEqual(1_201)
     expect(view.truncated.mainChars).toBeGreaterThan(3_000)
   })
 

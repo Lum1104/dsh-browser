@@ -474,7 +474,7 @@ describe('dispatchToolCall', () => {
       async () => 'approved',
     )
 
-    expect(answer).toMatchObject({ ok: false, error: { message: expect.stringContaining('Call browser_snapshot again') } })
+    expect(answer).toMatchObject({ ok: false, error: { message: expect.stringContaining('does not belong to the current document') } })
     expect(chromeMock.sendMessage).not.toHaveBeenCalled()
   })
 

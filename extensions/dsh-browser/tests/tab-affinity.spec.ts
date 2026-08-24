@@ -185,3 +185,55 @@ describe('TabAffinityController', () => {
     expect(restoredAffinity.allowsTarget(2, 'session-missing')).toBe(false)
   })
 })
+
+describe('TabAffinityController.bindTool', () => {
+  const userTab = { tabId: 1, windowId: 1, title: 'User page', url: 'https://a.example' }
+  const modelTab = { tabId: 2, windowId: 1, title: 'Opened page', url: 'https://b.example' }
+
+  it('keeps tools running when control moves to a tab the user is not looking at', () => {
+    const controller = new TabAffinityController()
+    controller.bindInitial(userTab)
+    controller.bindTool(modelTab)
+
+    const state = controller.snapshot()
+    expect(state.controlled?.tabId).toBe(2)
+    // 'background' is the state that means "assistant works there, you look
+    // here"; a 'handoff' would block the very calls the switch was made for.
+    expect(state.status).toBe('background')
+    expect(controller.resolveTarget()).toEqual({ kind: 'target', tab: expect.objectContaining({ tabId: 2 }) })
+  })
+
+  it('still asks when the user then moves somewhere else themselves', () => {
+    const controller = new TabAffinityController()
+    controller.bindInitial(userTab)
+    controller.bindTool(modelTab)
+    controller.observeActive({ tabId: 3, windowId: 1, title: 'Third', url: 'https://c.example' })
+
+    expect(controller.snapshot().status).toBe('handoff')
+    expect(controller.resolveTarget()).toEqual({ kind: 'handoff' })
+  })
+
+  it('follows normally when control moves to the tab already in front', () => {
+    const controller = new TabAffinityController()
+    controller.bindInitial(userTab)
+    controller.bindTool(userTab)
+    expect(controller.snapshot().status).toBe('following')
+  })
+
+  it('recovers a lost binding and bumps the revision panels watch', () => {
+    const controller = new TabAffinityController()
+    controller.bindInitial(userTab)
+    controller.removeTab(1)
+    expect(controller.snapshot().status).toBe('lost')
+
+    const before = controller.snapshot().revision
+    controller.bindTool(modelTab)
+    const after = controller.snapshot()
+    // With no known active tab the state is 'background' rather than
+    // 'following'; what matters is that tools may run again, and the next
+    // activation event resolves the visible pairing.
+    expect(after.controlled?.tabId).toBe(2)
+    expect(controller.resolveTarget().kind).toBe('target')
+    expect(after.revision).toBeGreaterThan(before)
+  })
+})

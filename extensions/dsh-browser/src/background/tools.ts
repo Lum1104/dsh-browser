@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tool dispatch: executes `tool.call` frames in an explicitly selected tab via
  * the content script and answers with the text-only result.
  *
@@ -9,7 +9,7 @@
  */
 
 import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import type { ToolError } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import type { ImageResultCaps, ToolImagePayload, ToolError } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import {
   allocateFrameBudgets,
   frameDocumentKey,
@@ -20,6 +20,20 @@ import {
 import { wrapUntrustedContent } from '../security/untrusted.ts'
 import { approvalPromptForCall } from './authorization.ts'
 import { waitForNextDocumentReady } from './navigation.ts'
+import {
+  blobFromDataUrl,
+  clampBoxToImage,
+  CaptureError,
+  encodeBitmap,
+  fetchImageBitmap,
+  type CaptureBox,
+} from './capture.ts'
+import {
+  captureElementShot,
+  chromeElementShotDeps,
+  shotScale,
+  type ElementShotDeps,
+} from './element-shot.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 
 /** A tool call from the bridge. */
@@ -53,6 +67,9 @@ const ACTION_DELTA_TOOLS = new Set([
   'browser_press',
   'browser_scroll',
   'browser_wait',
+  'browser_hover',
+  'browser_select_option',
+  'browser_act',
 ])
 const ACTION_DELTA_GUIDANCE = 'The page settled and its current changes are included below. Continue from this state; take another snapshot only when broader page context is needed.'
 const NAVIGATION_CANDIDATE_TOOLS = new Set([
@@ -61,8 +78,36 @@ const NAVIGATION_CANDIDATE_TOOLS = new Set([
   'browser_back',
   'browser_forward',
   'browser_reload',
+  'browser_act',
 ])
 const NAVIGATION_SNAPSHOT_GUIDANCE = 'Navigation completed and the current page snapshot is included below. Use it directly instead of taking an immediate duplicate snapshot.'
+/** Tools that hand back a valid element index, so they also refresh the baseline. */
+const BASELINE_TOOLS = new Set(['browser_snapshot', 'browser_find'])
+/** Tools addressing an element by index, which must belong to the snapshotted document. */
+const ELEMENT_TARGET_TOOLS = new Set([
+  'browser_click',
+  'browser_type',
+  'browser_select_option',
+  'browser_hover',
+  'browser_press',
+  'browser_scroll',
+  'browser_screenshot',
+  'browser_read_image',
+  'browser_act',
+])
+/** Tools whose result carries pixels. */
+const CAPTURE_TOOLS = new Set(['browser_screenshot', 'browser_read_image'])
+/** Everything that moves page content out of the page, text or pixels. */
+const PAGE_CONTENT_TOOLS = new Set([
+  'browser_snapshot',
+  'browser_get_text',
+  'browser_find',
+  'browser_screenshot',
+  'browser_read_image',
+  // An evaluation's return value is page content in arbitrary form, so the
+  // sharing-off boundary blocks it like any read.
+  'browser_evaluate',
+])
 const pendingInjections = new Map<number, Promise<void>>()
 const snapshotDocumentsByTab = new Map<number, Map<number, string>>()
 
@@ -123,7 +168,7 @@ function cancelled(): ToolAnswer {
 }
 
 /** Preserve the factual approval outcome for the model without prescribing a response. */
-function approvalFailure(approval: ApprovalPrompt, authorization: Exclude<ApprovalAuthorization, 'approved'>): ToolAnswer {
+export function approvalFailure(approval: ApprovalPrompt, authorization: Exclude<ApprovalAuthorization, 'approved'>): ToolAnswer {
   switch (authorization) {
     case 'denied':
       return {
@@ -189,6 +234,217 @@ function answerNavigationPending(answer: ToolAnswer): boolean {
     && typeof answer.result === 'object'
     && answer.result !== null
     && (answer.result as { navigationPending?: unknown }).navigationPending === true
+}
+
+/** The pixel sources the content script resolved, when the call asked for any. */
+function answerImageSources(answer: ToolAnswer): ContentImageSource[] {
+  if (!answer.ok || typeof answer.result !== 'object' || answer.result === null) return []
+  const sources = (answer.result as { imageSources?: unknown }).imageSources
+  if (!Array.isArray(sources)) return []
+  return sources.filter((source): source is ContentImageSource => {
+    if (typeof source !== 'object' || source === null) return false
+    const kind = (source as { kind?: unknown }).kind
+    return kind === 'url' || kind === 'data' || kind === 'box'
+  })
+}
+
+/** Mirror of the content script's resolved pixel source. */
+type ContentImageSource =
+  | { kind: 'url'; url: string; width: number; height: number; name?: string; fallbacks?: string[]; box?: CaptureBox }
+  | { kind: 'data'; dataUrl: string; width: number; height: number; name?: string }
+  | { kind: 'box'; box: CaptureBox; name?: string }
+
+/**
+ * The tab a call runs against. Window and visibility are optional so a direct
+ * caller (and the existing tests) can still name a tab by id and url alone;
+ * only a capture needs the rest.
+ */
+export type ToolTargetTab = Pick<chrome.tabs.Tab, 'id' | 'url'> & Partial<Pick<chrome.tabs.Tab, 'windowId' | 'active'>>
+
+/** The tab facts a capture needs beyond its id. */
+export interface CaptureTarget {
+  windowId?: number
+  active?: boolean
+}
+
+/**
+ * Turn resolved pixel sources into image payloads on the answer.
+ *
+ * A capture that cannot be produced degrades to its text status plus the
+ * reason: the model asked to see something and must learn that it cannot,
+ * without losing the turn to a tool failure it can do nothing about. With
+ * several sources, the ones that worked are returned and the rest are explained
+ * — a forum post with one dead image should still show the other four.
+ *
+ * @param target - window and visibility facts of the controlled tab.
+ * @param text - the content script's status text.
+ * @param sources - resolved sources; empty means capture the viewport.
+ * @param caps - the host's negotiated image budget.
+ * @param tabId - the controlled tab, enabling the full-resolution protocol capture.
+ * @returns the answer, with `images` when pixels were obtained.
+ */
+export async function captureAnswer(
+  target: CaptureTarget,
+  text: string,
+  sources: readonly ContentImageSource[],
+  caps: ImageResultCaps,
+  tabId?: number,
+): Promise<ToolAnswer> {
+  const requested = sources.length === 0 ? [undefined] : sources.slice(0, caps.maxPerCall)
+  const images: ToolImagePayload[] = []
+  const notes: string[] = []
+  if (sources.length > requested.length) {
+    notes.push(`Only the first ${requested.length} of ${sources.length} images were read; this deployment accepts ${caps.maxPerCall} per call.`)
+  }
+  for (const source of requested) {
+    try {
+      images.push(await captureImage(target, source, caps, tabId))
+    } catch (error: unknown) {
+      const reason = error instanceof CaptureError
+        ? error.message
+        : error instanceof Error ? error.message : String(error)
+      notes.push(`${source?.name ?? 'One image'} could not be produced: ${reason}`)
+    }
+  }
+  const suffix = notes.length === 0 ? '' : `\n${notes.join('\n')}`
+  if (images.length === 0) return { ok: true, result: { text: `${text}${suffix}` } }
+  return { ok: true, result: { text: `${text}${suffix}`, images } }
+}
+
+/**
+ * Fetch a URL source, walking its fallbacks.
+ *
+ * For each candidate, cache first, then the network. An image host with hotlink
+ * protection answers 404 to a service-worker fetch (no `Referer`), but the page
+ * already loaded the same URL with the right headers — `force-cache` reads those
+ * bytes without touching the network. Only when the cache has nothing do we try
+ * a live fetch, which still helps for a full-size original the page never
+ * requested. Cache-then-network is per URL so a cached thumbnail cannot beat a
+ * still-untried original.
+ *
+ * The content script offers the full-size original first and the thumbnail
+ * last, so a 403 or an oversized original still yields the picture instead of
+ * an error the model can do nothing with.
+ */
+async function fetchWithFallbacks(source: { url: string; fallbacks?: string[] }, caps: ImageResultCaps): Promise<ImageBitmap> {
+  const candidates = [source.url, ...(source.fallbacks ?? [])]
+  let last: unknown
+  for (const url of candidates) {
+    for (const cache of ['force-cache', 'default'] as const) {
+      try {
+        return await fetchImageBitmap(url, caps.maxBytes, cache)
+      } catch (error: unknown) {
+        last = error
+      }
+    }
+  }
+  throw last instanceof Error ? last : new CaptureError('no candidate URL for this image could be read')
+}
+
+/**
+ * Photograph one element region, preferring the protocol screenshot.
+ *
+ * `Page.captureScreenshot` re-rasterizes the clip at its own scale, so an image
+ * displayed smaller than its natural size comes back near full resolution — the
+ * answer for a host that refuses a service-worker fetch. It also reaches a
+ * region scrolled out of view. Both properties are unavailable to
+ * `captureVisibleTab`, which only ever returns the screen.
+ *
+ * It needs the optional debugger permission, which is never requested here: an
+ * image read must not become a permission prompt. Without it (or on any protocol
+ * failure) this falls back to cropping the viewport capture, which is what the
+ * user can see and therefore always defensible.
+ *
+ * @param tabId - the controlled tab, when known; absent forces the viewport path.
+ * @param natural - the source's own pixel size, used to choose the scale.
+ */
+async function captureFromBox(
+  target: CaptureTarget,
+  box: CaptureBox,
+  name: string | undefined,
+  caps: ImageResultCaps,
+  tabId?: number,
+  natural?: { width: number; height: number },
+  deps: ElementShotDeps = chromeElementShotDeps(),
+): Promise<ToolImagePayload> {
+  if (tabId !== undefined && box.pageX !== undefined && box.pageY !== undefined) {
+    try {
+      const dataUrl = await captureElementShot(tabId, {
+        x: box.pageX,
+        y: box.pageY,
+        width: box.width,
+        height: box.height,
+        scale: shotScale(box, natural, caps),
+      }, deps)
+      return encodeBitmap(await createImageBitmap(await blobFromDataUrl(dataUrl)), caps, undefined, name)
+    } catch {
+      // Fall through to the viewport crop: no permission, DevTools open, or a
+      // protocol refusal all mean the same thing here.
+    }
+  }
+  const viewport = await captureViewport(target)
+  const crop = clampBoxToImage(box, viewport.width, viewport.height)
+  if (crop === undefined) {
+    throw new CaptureError('the element is scrolled outside the visible viewport; scroll to it and capture again')
+  }
+  return encodeBitmap(viewport, caps, crop, name)
+}
+
+async function captureImage(
+  target: CaptureTarget,
+  source: ContentImageSource | undefined,
+  caps: ImageResultCaps,
+  tabId?: number,
+): Promise<ToolImagePayload> {
+  if (source?.kind === 'url') {
+    const natural = source.width > 0 && source.height > 0
+      ? { width: source.width, height: source.height }
+      : undefined
+    try {
+      return encodeBitmap(await fetchWithFallbacks(source, caps), caps, undefined, source.name)
+    } catch (error: unknown) {
+      if (source.box === undefined) throw error
+      // The picture is already on screen. Re-rasterizing it needs no Referer,
+      // cookies, or CORS — which is exactly what the host just refused.
+      return captureFromBox(target, source.box, source.name, caps, tabId, natural)
+    }
+  }
+  if (source?.kind === 'data') {
+    let bitmap: ImageBitmap
+    try {
+      bitmap = await createImageBitmap(await blobFromDataUrl(source.dataUrl))
+    } catch {
+      throw new CaptureError('the rendered image data could not be decoded')
+    }
+    return encodeBitmap(bitmap, caps, undefined, source.name)
+  }
+  if (source === undefined) return encodeBitmap(await captureViewport(target), caps)
+  return captureFromBox(target, source.box, source.name, caps, tabId)
+}
+
+/** Capture the visible tab of the controlled window and decode it. */
+async function captureViewport(target: CaptureTarget): Promise<ImageBitmap> {
+  if (target.active === false) {
+    throw new CaptureError(
+      'the controlled page is a background tab, and only a visible tab can be captured; bring it forward with browser_tabs (action "switch", activate true) or ask the user to focus it',
+    )
+  }
+  let dataUrl: string
+  try {
+    dataUrl = target.windowId === undefined
+      ? await chrome.tabs.captureVisibleTab({ format: 'png' })
+      : await chrome.tabs.captureVisibleTab(target.windowId, { format: 'png' })
+  } catch (error: unknown) {
+    throw new CaptureError(`the tab could not be captured: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
+    throw new CaptureError('the tab capture returned no image data')
+  }
+  try {
+    return await createImageBitmap(await blobFromDataUrl(dataUrl))
+  } catch {
+    throw new CaptureError('the tab capture could not be decoded')
+  }
 }
 
 /** Keep extension-authored action status outside the nonce-bound page-data boundary. */
@@ -297,6 +553,7 @@ async function dispatchOnce(
   signal?: AbortSignal,
   targetStillAllowed?: () => boolean,
   includeActionDelta: boolean = false,
+  capture?: { target: CaptureTarget; caps: ImageResultCaps },
 ): Promise<ToolAnswer> {
   if (isCancelled(call, signal)) return cancelled()
   if (targetStillAllowed?.() === false) return targetChanged()
@@ -342,6 +599,22 @@ async function dispatchOnce(
   if (text === undefined) {
     navigationWait?.cancel()
     return response
+  }
+  // A lookup hands back element indices, so it also establishes the baseline
+  // that authorizes a later click or type against this document.
+  if (BASELINE_TOOLS.has(call.name)) {
+    const documents = snapshotDocumentsByTab.get(tabId) ?? new Map<number, string>()
+    documents.set(frameId, frameDocumentKey(frame))
+    snapshotDocumentsByTab.set(tabId, documents)
+  }
+  if (CAPTURE_TOOLS.has(call.name)) {
+    navigationWait?.cancel()
+    if (capture === undefined) {
+      return { ok: true, result: { text: `${text}\nThe image could not be produced: this dsh deployment does not accept image results.` } }
+    }
+    if (isCancelled(call, signal)) return cancelled()
+    if (targetStillAllowed?.() === false) return targetChanged()
+    return captureAnswer(capture.target, text, answerImageSources(response), capture.caps, tabId)
   }
   if (answerNavigationPending(response) && navigationWait !== undefined) {
     const ready = await navigationWait.ready
@@ -389,12 +662,14 @@ export async function dispatchToolCall(
   budget?: ContentBudget,
   authorize?: (prompt: ApprovalPrompt) => Promise<ApprovalAuthorization>,
   signal?: AbortSignal,
-  targetTab?: Pick<chrome.tabs.Tab, 'id' | 'url'>,
+  targetTab?: ToolTargetTab,
   targetStillAllowed?: () => boolean,
+  imageCaps?: ImageResultCaps,
 ): Promise<ToolAnswer> {
   if (isCancelled(call, signal)) return cancelled()
-  // Privacy boundary: with sharing off, no page content may leave the page.
-  if (sharePageContent === 'off' && (call.name === 'browser_snapshot' || call.name === 'browser_get_text')) {
+  // Privacy boundary: with sharing off, no page content may leave the page —
+  // and a capture is page content in its most complete form.
+  if (sharePageContent === 'off' && PAGE_CONTENT_TOOLS.has(call.name)) {
     return { ok: false, error: { code: 'action-failed', message: 'Page content sharing is disabled in Settings > Page content sharing.' } }
   }
   const tab = targetTab ?? (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]
@@ -404,6 +679,15 @@ export async function dispatchToolCall(
   }
   if (targetStillAllowed?.() === false) return targetChanged()
   const effectiveBudget = budget ?? { maxItems: 60, maxChars: DEFAULT_SNAPSHOT_MAX_CHARS }
+  const capture = CAPTURE_TOOLS.has(call.name) && imageCaps !== undefined
+    ? {
+        caps: imageCaps,
+        target: {
+          ...(tab.windowId === undefined ? {} : { windowId: tab.windowId }),
+          ...(tab.active === undefined ? {} : { active: tab.active }),
+        },
+      }
+    : undefined
   const frames = await listTabFrames(tab.id, tab.url)
   if (isCancelled(call, signal)) return cancelled()
   if (targetStillAllowed?.() === false) return targetChanged()
@@ -443,6 +727,7 @@ export async function dispatchToolCall(
       signal,
       targetStillAllowed,
       sharePageContent === 'auto',
+      capture,
     )
   } catch {
     if (isCancelled(call, signal)) return cancelled()
@@ -477,6 +762,7 @@ export async function dispatchToolCall(
         signal,
         targetStillAllowed,
         sharePageContent === 'auto',
+        capture,
       )
     } catch {
       return unavailable('The content script could not be loaded on this page. Chrome internal and protected pages do not support browser operations.')
@@ -495,14 +781,38 @@ function validateFrameTarget(call: ToolCall, frames: TabFrame[]): ToolAnswer | u
 }
 
 function validateElementTarget(call: ToolCall, tabId: number, frames: TabFrame[]): ToolAnswer | undefined {
-  if (call.name !== 'browser_click' && call.name !== 'browser_type') return undefined
+  if (!ELEMENT_TARGET_TOOLS.has(call.name)) return undefined
+  // Only a call that actually names an index depends on the baseline: a
+  // viewport screenshot or a selector-addressed capture does not.
+  if (!callTargetsIndex(call)) return undefined
   const frameId = requestedFrame(call.args)
   const frame = frames.find((candidate) => candidate.frameId === frameId)
   const snapshotted = snapshotDocumentsByTab.get(tabId)?.get(frameId)
   if (frame === undefined || snapshotted === undefined || snapshotted !== frameDocumentKey(frame)) {
-    return unavailable('The element reference does not belong to the current document. Call browser_snapshot again for current frame and index values.')
+    return unavailable('The element reference does not belong to the current document. Call browser_snapshot or browser_find again for current frame and index values.')
   }
   return undefined
+}
+
+/**
+ * Whether this call depends on the inventory numbering being current.
+ *
+ * A call that also carries a selector does not: the selector is evaluated
+ * against the live document, so a stale index costs it nothing and blocking it
+ * on a missing baseline would defeat the fallback. Only a bare index needs the
+ * document to be the one that was inventoried.
+ */
+function callTargetsIndex(call: ToolCall): boolean {
+  const hasSelector = typeof call.args.selector === 'string' && call.args.selector !== ''
+  if (typeof call.args.index === 'number') return !hasSelector
+  if (call.name !== 'browser_act') return false
+  const steps = call.args.steps
+  return Array.isArray(steps) && steps.some((step) => {
+    if (typeof step !== 'object' || step === null) return false
+    const entry = step as { index?: unknown; selector?: unknown }
+    if (typeof entry.index !== 'number') return false
+    return !(typeof entry.selector === 'string' && entry.selector !== '')
+  })
 }
 
 function sameApprovalBoundary(before: ApprovalPrompt, after: ApprovalPrompt): boolean {

@@ -7,7 +7,10 @@ export interface SessionPickerEntry {
   updatedAt: number
   running: boolean
   blank: boolean
+  /** Working directory shown in the picker, when the host reported one. */
   cwd?: string
+  /** The agent preset this session actually runs, when the deployment composes one. */
+  agentPreset?: string
   origin?: 'subagent'
   projections?: {
     asOfSeq: number

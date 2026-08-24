@@ -87,3 +87,75 @@ describe('originFromUrl', () => {
     expect(originFromUrl('not a url')).toBeUndefined()
   })
 })
+
+describe('approvalPromptForCall: the advanced tool surface', () => {
+  it('treats a capture as a page read, honoring the sharing preference', () => {
+    expect(approvalPromptForCall(call('browser_screenshot'), 'auto', FRAMES, 'en')).toBeUndefined()
+    const prompt = approvalPromptForCall(call('browser_screenshot'), 'ask', FRAMES, 'en')
+    expect(prompt).toMatchObject({ kind: 'read', canTrust: false })
+    expect(prompt?.summary).toContain('picture')
+    // A viewport capture spans every frame, exactly like a snapshot.
+    expect(prompt?.origins).toEqual(['https://app.example', 'https://login.example.net'])
+  })
+
+  it('scopes an element capture and an image read to their own frame', () => {
+    expect(approvalPromptForCall(call('browser_screenshot', { frame: 4, index: 3 }), 'ask', FRAMES, 'en')?.origins)
+      .toEqual(['https://login.example.net'])
+    expect(approvalPromptForCall(call('browser_read_image', { frame: 4, index: 3 }), 'ask', FRAMES, 'en'))
+      .toMatchObject({ kind: 'read', origins: ['https://login.example.net'] })
+  })
+
+  it('treats a lookup as a read and echoes what is being searched for', () => {
+    const prompt = approvalPromptForCall(call('browser_find', { text: 'Sign in' }), 'ask', FRAMES, 'en')
+    expect(prompt).toMatchObject({ kind: 'read' })
+    expect(prompt?.summary).toContain('Sign in')
+  })
+
+  it('requires approval for the new page actions regardless of sharing', () => {
+    for (const name of ['browser_hover', 'browser_select_option', 'browser_act']) {
+      expect(approvalPromptForCall(call(name, { index: 3 }), 'auto', FRAMES, 'en')).toMatchObject({ kind: 'action' })
+    }
+  })
+
+  it('names every batch step in the one dialog that covers them', () => {
+    const prompt = approvalPromptForCall(call('browser_act', {
+      steps: [
+        { action: 'type', index: 2, text: 'secret-value' },
+        { action: 'click', index: 3 },
+      ],
+    }), 'auto', FRAMES, 'en')
+    expect(prompt?.summary).toContain('1. type [2]')
+    expect(prompt?.summary).toContain('2. click [3]')
+    // Typed text is counted, never shown, exactly as for a single browser_type.
+    expect(prompt?.summary).toContain('12 characters')
+    expect(prompt?.summary).not.toContain('secret-value')
+  })
+
+  it('summarizes a long batch without dumping every step', () => {
+    const prompt = approvalPromptForCall(call('browser_act', {
+      steps: Array.from({ length: 11 }, (_, index) => ({ action: 'click', index })),
+    }), 'auto', FRAMES, 'en')
+    expect(prompt?.summary).toContain('and 3 more')
+  })
+
+  it('names the chosen option for a dropdown', () => {
+    const prompt = approvalPromptForCall(call('browser_select_option', { index: 5, values: ['Blue'] }), 'auto', FRAMES, 'en')
+    expect(prompt?.summary).toContain('Blue')
+  })
+
+  it('authorizes tab management on its own terms', () => {
+    // Listing tabs is a read of the user's browsing, not of one page.
+    expect(approvalPromptForCall(call('browser_tabs', { action: 'list' }), 'auto', FRAMES, 'en')).toBeUndefined()
+    expect(approvalPromptForCall(call('browser_tabs', { action: 'list' }), 'ask', FRAMES, 'en'))
+      .toMatchObject({ kind: 'read', origins: [] })
+
+    const open = approvalPromptForCall(call('browser_tabs', { action: 'open', url: 'https://new.example/x' }), 'auto', FRAMES, 'en')
+    expect(open).toMatchObject({ kind: 'action', origins: ['https://new.example'], canTrust: false })
+    expect(open?.summary).toContain('new.example')
+
+    expect(approvalPromptForCall(call('browser_tabs', { action: 'close', tabId: 7 }), 'auto', FRAMES, 'en')?.summary)
+      .toContain('Close tab 7')
+    // Rearranging tabs must never become a persistent per-origin allowance.
+    expect(approvalPromptForCall(call('browser_tabs', { action: 'switch', tabId: 7 }), 'auto', FRAMES, 'en')?.canTrust).toBe(false)
+  })
+})

@@ -3,7 +3,7 @@
     "message": "dsh 浏览器助手"
   },
   "extensionDescription": {
-    "message": "让 dsh 无需视觉能力即可直接读取并操作浏览器的 Chrome 侧边栏扩展。"
+    "message": "让 dsh 直接读取、操作、搜索并截取浏览器内容的侧边栏扩展，适用于 Chromium 浏览器（Chrome、Edge）。"
   },
   "actionTitle": {
     "message": "打开 dsh 浏览器助手"

@@ -13,6 +13,15 @@
 # string to keep those sessions Ungrouped.
 # Sessions materialize only on the first message (deferSessionCreate defaults
 # to true): opening the side panel without chatting leaves no session behind.
+# A preset chosen in the side panel before that first message is applied when
+# the session materializes.
+#
+# imageCapture registers browser_screenshot and browser_read_image, which
+# return real images. They appear only when the deployment composes an
+# attachment store, and each call additionally verifies that the session's
+# current model route declares image input — on a text-only route the capture
+# degrades to its text status instead of failing the turn. Set false to keep
+# the tool surface strictly text.
 #
 # Security: the bridge path carries its own token auth and refuses privileged
 # gateway methods (settings/credentials/open-*) for non-loopback remotes. Do
@@ -25,5 +34,7 @@
         token: !!js process.env.DSH_EXT_TOKEN
         sessionWorkspacePath: !!js process.env.DSH_BROWSER_SESSION_WORKSPACE
         toolTimeoutMs: 90000
-        snapshotMaxChars: 32000
-        maxInteractiveItems: 60
+        snapshotMaxChars: 96000
+        maxInteractiveItems: 200
+        maxBatchSteps: 8
+        imageCapture: true

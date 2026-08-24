@@ -22,6 +22,7 @@ import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-attachment'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-host-apiproxy'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
@@ -30,7 +31,8 @@ import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { BridgeServer } from './server.ts'
 import { BrowserContextInjector } from './browser-context.ts'
-import { registerBrowserTools } from './tools.ts'
+import { DEFAULT_MAX_BATCH_STEPS, registerBrowserTools, type ImageAdmission } from './tools.ts'
+import { imageResultCaps } from './tool-images.ts'
 import {
   BRIDGE_CONFIG_PATH,
   BRIDGE_PATH,
@@ -51,8 +53,12 @@ export const inject = ['webServer', 'apiProxy', 'tools', 'agents']
 /** Default per-tool-call budget (ms). */
 const DEFAULT_TOOL_TIMEOUT_MS = 90_000
 
-/** Default cap on interactive inventory items per snapshot. */
-const DEFAULT_MAX_INTERACTIVE_ITEMS = 60
+/**
+ * Default cap on interactive inventory items per snapshot. A page whose
+ * controls are cut off makes the model click by guess, so this is generous;
+ * items are cheap next to main text.
+ */
+const DEFAULT_MAX_INTERACTIVE_ITEMS = 200
 
 /** Default directory backing the browser extension's session group. */
 const DEFAULT_SESSION_WORKSPACE_PATH = dshHomePath('browser-sessions')
@@ -69,14 +75,22 @@ export interface Config {
   token?: string
   /** Per-tool-call timeout in ms. Defaults to 90000. */
   toolTimeoutMs?: number
-  /** Upper bound on one snapshot's rendered characters. Defaults to 32000; minimum 500. */
+  /** Upper bound on one snapshot's rendered characters. Defaults to 96000; minimum 500. */
   snapshotMaxChars?: number
-  /** Upper bound on interactive inventory items per snapshot. Defaults to 60. */
+  /** Upper bound on interactive inventory items per snapshot. Defaults to 200. */
   maxInteractiveItems?: number
+  /** Upper bound on steps in one `browser_act` batch. Defaults to 8. */
+  maxBatchSteps?: number
   /** Dedicated workspace path for extension-created sessions. Empty disables grouping. */
   sessionWorkspacePath?: string
   /** Defer real session creation until the first prompt. Defaults to true. */
   deferSessionCreate?: boolean
+  /**
+   * Offer `browser_screenshot` and `browser_read_image` when the deployment
+   * stores durable attachments. Defaults to true; set false to keep the tool
+   * surface strictly text-only (for example behind a text-only model route).
+   */
+  imageCapture?: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -84,8 +98,10 @@ export const Config: z<Config> = z.object({
   toolTimeoutMs: z.number().step(1).min(1).default(DEFAULT_TOOL_TIMEOUT_MS),
   snapshotMaxChars: z.number().step(1).min(MIN_SNAPSHOT_MAX_CHARS).default(DEFAULT_SNAPSHOT_MAX_CHARS),
   maxInteractiveItems: z.number().step(1).min(1).default(DEFAULT_MAX_INTERACTIVE_ITEMS),
+  maxBatchSteps: z.number().step(1).min(1).default(DEFAULT_MAX_BATCH_STEPS),
   sessionWorkspacePath: z.string().default(DEFAULT_SESSION_WORKSPACE_PATH),
   deferSessionCreate: z.boolean().default(DEFAULT_DEFER_SESSION_CREATE),
+  imageCapture: z.boolean().default(true),
 })
 
 /** The shape after schemastery applies its defaults to every field. */
@@ -109,8 +125,10 @@ export function resolveConfig(config: Config): ResolvedConfig {
     toolTimeoutMs: config.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS,
     snapshotMaxChars: config.snapshotMaxChars ?? DEFAULT_SNAPSHOT_MAX_CHARS,
     maxInteractiveItems: config.maxInteractiveItems ?? DEFAULT_MAX_INTERACTIVE_ITEMS,
+    maxBatchSteps: config.maxBatchSteps ?? DEFAULT_MAX_BATCH_STEPS,
     sessionWorkspacePath: config.sessionWorkspacePath ?? DEFAULT_SESSION_WORKSPACE_PATH,
     deferSessionCreate: config.deferSessionCreate ?? DEFAULT_DEFER_SESSION_CREATE,
+    imageCapture: config.imageCapture ?? true,
   }
   assertPositiveInteger('toolTimeoutMs', resolved.toolTimeoutMs)
   assertPositiveInteger('snapshotMaxChars', resolved.snapshotMaxChars)
@@ -118,7 +136,41 @@ export function resolveConfig(config: Config): ResolvedConfig {
     throw new Error(`bridge-browser: snapshotMaxChars must be at least ${MIN_SNAPSHOT_MAX_CHARS}`)
   }
   assertPositiveInteger('maxInteractiveItems', resolved.maxInteractiveItems)
+  assertPositiveInteger('maxBatchSteps', resolved.maxBatchSteps)
   return resolved
+}
+
+/**
+ * Per-call proof that the live model route accepts image input.
+ *
+ * The route is read from the session's request header (its current selection)
+ * and falls back to the Agent's own options, mirroring how the MCP client
+ * admits tool images. Without this, a capture on a text-only route reaches an
+ * adapter that rejects the entire request as UNSUPPORTED_CONTENT — the model
+ * would lose the turn, not just the picture.
+ *
+ * @param ctx - Cordis context carrying the optional llm service.
+ * @returns an admission check returning a refusal reason, or `undefined` when images are accepted.
+ */
+export function imageAdmission(ctx: Context): ImageAdmission {
+  return async (exec) => {
+    const llm = ctx.get('llm')
+    if (llm === undefined) return 'no model service is available to verify image support'
+    try {
+      const agent = exec.agent
+      const routed = agent?.session.requestHeader()?.config
+      const provider = routed?.provider ?? agent?.options.provider
+      const model = routed?.model ?? agent?.options.model
+      if (provider === undefined || model === undefined) return 'the current model route could not be resolved'
+      const info = await llm.resolveModelInfo(provider, model, exec.signal)
+      if (info.inputModalities === undefined || !info.inputModalities.includes('image')) {
+        return `the current model "${model}" does not accept image input`
+      }
+    } catch {
+      return 'the current model route could not be verified'
+    }
+    return undefined
+  }
 }
 
 /**
@@ -132,6 +184,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const resolved = resolveConfig(config)
 
   const tokenRes = await resolveToken(resolved.token)
+  const attachments = ctx.get('attachments')
   // Workspace grouping wraps the gateway create; session deferral wraps the
   // result so materialization at first prompt still flows through grouping.
   const api: ApiProxy = withSessionDeferral(
@@ -141,8 +194,16 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       message => { ctx.logger.warn(message) },
     ),
     resolved.deferSessionCreate,
-    ctx.get('attachments')?.imageLimits,
+    attachments?.imageLimits,
   )
+  // Capture tools exist only with a store to commit their bytes to: the pure
+  // result projection needs the durable reference to already exist.
+  const imageCaps = resolved.imageCapture && attachments !== undefined
+    ? imageResultCaps(attachments.imageLimits)
+    : undefined
+  const images = imageCaps === undefined || attachments === undefined
+    ? undefined
+    : { store: attachments, caps: imageCaps, admit: imageAdmission(ctx) }
   const browserContext = new BrowserContextInjector(ctx.agents)
   ctx.on('agent/session-start', ({ agent }) => { browserContext.activate(agent) })
 
@@ -172,6 +233,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       textOnly: true,
       snapshotMaxChars: resolved.snapshotMaxChars,
       maxInteractiveItems: resolved.maxInteractiveItems,
+      ...(imageCaps === undefined ? {} : { images: imageCaps }),
     },
     injectBrowserSnapshot: (sessionId, snapshot) => { browserContext.inject(sessionId, snapshot) },
     purgeSession,
@@ -204,6 +266,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       toolTimeoutMs: resolved.toolTimeoutMs,
       snapshotMaxChars: resolved.snapshotMaxChars,
       maxInteractiveItems: resolved.maxInteractiveItems,
+      maxBatchSteps: resolved.maxBatchSteps,
+      ...(images === undefined ? {} : { images }),
     })
     return () => { for (const dispose of disposers.values()) dispose() }
   }, 'bridge-browser: browser tools')
@@ -215,9 +279,22 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     ctx.effect(() => systemPrompt.section({
       name: 'tool:bridge-browser',
       order: 107,
-      text: 'A browser bridge may be connected. To read or operate the user\'s active browser page, call browser_snapshot '
-        + '(text-only; numbered items are the click/type targets), unless the current turn already includes a plugin-provided '
-        + 'followed-page browser_snapshot. Reuse that injected snapshot and its indices directly. Never assume page content you have not snapshotted.',
+      text: [
+        'A browser bridge may be connected. To read or operate the user\'s active browser page, call browser_snapshot '
+          + '(text-only; numbered items are the click/type targets), unless the current turn already includes a plugin-provided '
+          + 'followed-page browser_snapshot. Reuse that injected snapshot and its indices directly. Never assume page content you have not snapshotted.',
+        'Work in as few calls as possible: browser_find locates a control without a full snapshot, browser_act runs a whole '
+          + 'step sequence in one call, and browser_wait blocks until a condition holds instead of polling with snapshots.',
+        'Go and get what you need instead of asking the user to fetch it: browser_search finds sources, browser_read_pages '
+          + 'opens several of them in background tabs and returns one digest, and browser_expand reveals content behind '
+          + '"show more" or lazy loading. These use background tabs, so the page the user is on is never disturbed. '
+          + 'browser_download saves files through the browser itself, and browser_verify clicks a human-verification checkbox.',
+        ...(images === undefined
+          ? []
+          : ['browser_screenshot and browser_read_image return real images you can see. Use them when layout, rendering, or '
+            + 'picture content matters — a chart, a canvas, a captcha, a visual check after an action — and stay with the text '
+            + 'snapshot for ordinary reading and targeting.']),
+      ].join('\n'),
     }), 'bridge-browser: system prompt section')
   }
 
@@ -227,4 +304,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       : `browser bridge: using token from ${tokenRes.file}`,
   )
   ctx.logger.info(`browser bridge: listening on ${BRIDGE_PATH}`)
+  ctx.logger.info(images === undefined
+    ? 'browser bridge: text-only tool surface (no attachment store composed, or imageCapture disabled)'
+    : `browser bridge: image capture enabled (max ${images.caps.maxDimension}px, ${images.caps.maxBytes} bytes, ${images.caps.maxPerCall} per call)`)
 }

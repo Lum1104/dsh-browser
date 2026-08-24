@@ -13,7 +13,7 @@ import type { BridgeCaps } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeState } from '../background/bridge.ts'
 import type { AffinityTab, TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
-import { connectPanel, PanelRpcError, type PanelApi, type PanelSettings } from './api.ts'
+import { connectPanel, PanelRpcError, type PanelApi, type PanelSettings, type PermissionRequest } from './api.ts'
 import { renderMarkdown } from './markdown.ts'
 import whaleUrl from '../../assets/icons/deepseek-256.png'
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
@@ -64,6 +64,15 @@ import {
   SessionRuntimeCache,
   type SessionPickerEntry,
 } from './sessions.ts'
+import {
+  defaultPresetId,
+  isPresetMissing,
+  needsFreshSession,
+  parsePresetRoster,
+  presetLabel,
+  presetLabelFor,
+  type AgentPresetEntry,
+} from './presets.ts'
 
 /** One rendered conversation row. */
 import {
@@ -530,6 +539,160 @@ const ToolActivity = memo(function ToolActivity({ row, copy }: { row: Row; copy:
   )
 })
 
+/**
+ * The agent-preset switcher: the current composition plus a list to change it.
+ *
+ * It sits in its own bar rather than the topbar because a preset is standing
+ * context for the whole conversation — which tools the agent has — and the
+ * topbar's three cells are already spoken for in a panel this narrow.
+ */
+function PresetBar({
+  presets,
+  presetId,
+  open,
+  busy,
+  locked,
+  notice,
+  disabled,
+  copy,
+  onToggle,
+  onChoose,
+  onStartWith,
+  onDismissLocked,
+}: {
+  presets: AgentPresetEntry[]
+  presetId: string | null
+  open: boolean
+  busy: boolean
+  locked: AgentPresetEntry | null
+  notice: string | null
+  disabled: boolean
+  copy: PanelCopy
+  onToggle: () => void
+  onChoose: (entry: AgentPresetEntry) => void
+  onStartWith: (entry: AgentPresetEntry) => void
+  onDismissLocked: () => void
+}): React.JSX.Element | null {
+  // A deployment that composes no presets has nothing to switch, so the bar
+  // does not exist rather than showing an empty control.
+  if (presets.length === 0) return null
+  const label = presetLabelFor(presets, presetId, copy.presets.unknown)
+  return (
+    <section className="preset-bar" aria-label={copy.presets.eyebrow}>
+      <button
+        className="preset-trigger"
+        disabled={disabled}
+        aria-expanded={open}
+        aria-label={copy.presets.open}
+        title={copy.presets.open}
+        onClick={onToggle}
+      >
+        <span className="eyebrow">{copy.presets.eyebrow}</span>
+        <span className="preset-current">{busy ? copy.presets.switching : label}</span>
+        <ChevronDownIcon />
+      </button>
+      {notice !== null && !open && <p className="preset-notice">{notice}</p>}
+      {open && (
+        <div className="preset-panel">
+          {notice !== null && <p className="preset-notice">{notice}</p>}
+          {locked !== null && (
+            <div className="preset-locked" role="alert">
+              <strong>{copy.presets.lockedTitle(presetLabel(locked))}</strong>
+              <p>{copy.presets.lockedBody}</p>
+              <div className="preset-locked-actions">
+                <button className="primary" disabled={busy} onClick={() => onStartWith(locked)}>
+                  {copy.presets.lockedAction(presetLabel(locked))}
+                </button>
+                <button className="secondary" onClick={onDismissLocked}>{copy.presets.lockedDismiss}</button>
+              </div>
+            </div>
+          )}
+          <ul className="preset-list">
+            {presets.map((entry) => {
+              const active = entry.id === presetId
+              const unusable = entry.broken !== undefined
+              return (
+                <li key={entry.id}>
+                  <button
+                    disabled={busy || unusable}
+                    aria-current={active ? 'true' : undefined}
+                    title={entry.broken ?? entry.description ?? presetLabel(entry)}
+                    onClick={() => onChoose(entry)}
+                  >
+                    <span className="preset-name">
+                      {presetLabel(entry)}
+                      <span className={`preset-trust ${entry.trust}`}>
+                        {entry.trust === 'system' ? copy.presets.system : copy.presets.user}
+                      </span>
+                      {entry.isDefault && <span className="preset-badge">{copy.presets.defaultBadge}</span>}
+                      {unusable && <span className="preset-badge broken">{copy.presets.brokenBadge}</span>}
+                    </span>
+                    {entry.description !== undefined && <span className="preset-description">{entry.description}</span>}
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      )}
+    </section>
+  )
+}
+
+/**
+ * Consent for an optional Chrome permission.
+ *
+ * `chrome.permissions.request` must be called from a user gesture inside an
+ * extension page, so the grant happens HERE, in the click handler — the
+ * service worker can only ask. Chrome then shows its own confirmation on top
+ * of this one, which is the point: the browser's dialog is the authority, and
+ * this one explains why it is about to appear.
+ */
+function PermissionDialog({
+  request,
+  copy,
+  onSettled,
+}: {
+  request: PermissionRequest
+  copy: PanelCopy
+  onSettled: (granted: boolean) => void
+}): React.JSX.Element {
+  const [failed, setFailed] = useState(false)
+  return (
+    <div className="approval-backdrop">
+      <section className="approval-dialog" role="alertdialog" aria-modal="true" aria-labelledby="permission-title">
+        <div className="approval-rail" aria-hidden="true" />
+        <div className="approval-heading">
+          <span className="approval-shield"><ShieldIcon /></span>
+          <div>
+            <span className="eyebrow">{copy.permission.eyebrow}</span>
+            <h2 id="permission-title">{copy.permission.title}</h2>
+          </div>
+        </div>
+        <p className="permission-body">{copy.permission.body}</p>
+        <p className="permission-body">{copy.permission.reassurance}</p>
+        {failed && <p className="origin-error">{copy.permission.failed}</p>}
+        <div className="approval-actions">
+          <button className="deny" autoFocus onClick={() => onSettled(false)}>{copy.permission.deny}</button>
+          <button
+            className="allow"
+            onClick={() => {
+              // Must stay inside this handler: Chrome checks for the gesture.
+              void chrome.permissions.request({ permissions: [request.permission] }).then(
+                (granted) => {
+                  if (granted) onSettled(true)
+                  else setFailed(true)
+                },
+                () => { setFailed(true) },
+              )
+            }}
+          >{copy.permission.allow}</button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 export function App(): React.JSX.Element {
   const locale = useMemo(() => getUiLocale(), [])
   const copy = PANEL_COPY[locale]
@@ -564,6 +727,14 @@ export function App(): React.JSX.Element {
   const [resumeHint, setResumeHint] = useState<{ ready: boolean; sessionId: string | null }>({ ready: false, sessionId: null })
   const [questions, setQuestions] = useState<PendingQuestion[]>([])
   const [questionSubmissions, setQuestionSubmissions] = useState<ResolvedQuestion[]>([])
+  const [presets, setPresets] = useState<AgentPresetEntry[]>([])
+  const [presetId, setPresetId] = useState<string | null>(null)
+  const [showPresetPicker, setShowPresetPicker] = useState(false)
+  const [presetBusy, setPresetBusy] = useState(false)
+  const [presetLocked, setPresetLocked] = useState<AgentPresetEntry | null>(null)
+  const [presetNotice, setPresetNotice] = useState<string | null>(null)
+  const [permissionRequest, setPermissionRequest] = useState<PermissionRequest | null>(null)
+  const [debuggerGranted, setDebuggerGranted] = useState(false)
   const approvalQueueRef = useRef<ApprovalRequest[]>([])
   const questionsRef = useRef<PendingQuestion[]>([])
   const questionSubmissionsRef = useRef<ResolvedQuestion[]>([])
@@ -642,6 +813,7 @@ export function App(): React.JSX.Element {
         trustedActionOrigins: raw?.trustedActionOrigins ?? [],
         approvalNotifications: raw?.approvalNotifications ?? true,
         autoResumeSession: raw?.autoResumeSession ?? true,
+        autoApproveActions: raw?.autoApproveActions ?? true,
       })
     })
   }, [])
@@ -668,6 +840,10 @@ export function App(): React.JSX.Element {
         setImageLimits(null)
         imageProjectionRef.current = { sessionId: null, seq: Number.NEGATIVE_INFINITY, limits: null }
         setSessionTitle(null)
+        setPresetId(null)
+        setShowPresetPicker(false)
+        setPresetLocked(null)
+        setPresetNotice(null)
         setWorking(false)
         setStopping(false)
         setSessionChanging(false)
@@ -694,20 +870,35 @@ export function App(): React.JSX.Element {
     const offResumeHint = api.onSessionResumeHint((sessionId) => {
       setResumeHint({ ready: true, sessionId })
     })
+    const offPermission = api.onPermissionRequest(setPermissionRequest)
     void api.requestStatus().catch((cause: unknown) => {
       setError(cause instanceof Error ? cause.message : String(cause))
     })
     return () => {
       offStatus(); offEvent(); offApproval(); offApprovalResolved()
-      offTabAffinity(); offSelection(); offResumeHint()
+      offTabAffinity(); offSelection(); offResumeHint(); offPermission()
     }
   }, [api])
+
+  // Reflect the real grant state rather than a stored preference: the user can
+  // revoke an optional permission in Chrome's own UI at any time.
+  useEffect(() => {
+    void chrome.permissions.contains({ permissions: ['debugger'] }).then(setDebuggerGranted, () => {})
+  }, [permissionRequest, showSettings])
 
   useEffect(() => {
     if (state === 'connected' && settings !== null && resumeHint.ready && sessionRef.current === null) {
       void initializeSession()
     }
   }, [state, sessionEpoch, settings, resumeHint])
+
+  // The roster is a deployment fact, so it is read once per connection rather
+  // than per session; a preset authored while the panel is open shows up on the
+  // next reconnect or when the picker is opened.
+  useEffect(() => {
+    if (state !== 'connected') return
+    void loadPresets()
+  }, [state, sessionEpoch])
 
   const queuedApproval = approvalQueue[0]
   useEffect(() => {
@@ -901,12 +1092,15 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function createSession(transition: number): Promise<void> {
-    const created = await api.rpc<{ sessionId: string }>('session.create', {})
+  async function createSession(transition: number, agentPreset?: string): Promise<void> {
+    const created = await api.rpc<{ sessionId: string; agentPreset?: string }>('session.create', {
+      ...(agentPreset === undefined ? {} : { agentPreset }),
+    })
     if (sessionTransitionRef.current !== transition) return
     sessionRef.current = created.sessionId
     await api.setActiveSession(created.sessionId, true)
     setSessionTitle(null)
+    setPresetId(created.agentPreset ?? agentPreset ?? defaultPresetId(presets))
     sessionRuntimeRef.current.seedRunning(created.sessionId, false)
     applyHistory(created.sessionId, await readHistory(created.sessionId))
   }
@@ -922,6 +1116,106 @@ export function App(): React.JSX.Element {
       sessionRuntimeRef.current.seedRunning(entry.sessionId, entry.running)
     }
     return resumableSessions(listed.items ?? []).filter((entry) => !archived.has(entry.sessionId))
+  }
+  /** Read the deployment's preset roster; a deployment with none simply has no switcher. */
+  async function loadPresets(): Promise<void> {
+    try {
+      const roster = parsePresetRoster(await api.rpc('agentPreset.list', {}))
+      if (roster === null) return
+      setPresets(roster.presets)
+      setPresetId((current) => current ?? defaultPresetId(roster.presets))
+    } catch {
+      // The roster is an affordance, not a dependency: a deployment without the
+      // agent-presets domain must still chat.
+    }
+  }
+
+  async function openPresetPicker(): Promise<void> {
+    if (showPresetPicker) {
+      setShowPresetPicker(false)
+      return
+    }
+    setShowPresetPicker(true)
+    setPresetLocked(null)
+    setPresetNotice(null)
+    await loadPresets()
+  }
+
+  /**
+   * Switch the current conversation's preset. The gateway allows it only while
+   * the session is blank, so a refusal is turned into the offer that actually
+   * works: a new conversation composed from the chosen preset.
+   */
+  /**
+   * Switch the current conversation's preset.
+   *
+   * The gateway can only recompose a session it knows about and that has run no
+   * turn. Both refusals — `agent-preset-locked` for a session with history and
+   * `session-not-found` for one still provisional — mean the same thing: the
+   * choice has to ride a NEW session, which `session.create({ agentPreset })`
+   * accepts directly. An EMPTY conversation is silently recreated, because
+   * there is nothing to lose and the user asked for a preset, not for a
+   * dialog; one with history asks first.
+   */
+  async function choosePreset(entry: AgentPresetEntry): Promise<void> {
+    const id = sessionRef.current
+    if (entry.broken !== undefined || presetBusy || id === null) return
+    if (entry.id === presetId) {
+      setShowPresetPicker(false)
+      return
+    }
+    setPresetBusy(true)
+    setPresetLocked(null)
+    setPresetNotice(null)
+    try {
+      await api.rpc('agentPreset.select', { sessionId: id, agentPreset: entry.id })
+      if (sessionRef.current !== id) return
+      setPresetId(entry.id)
+      setShowPresetPicker(false)
+      setPresetNotice(copy.presets.switched(presetLabel(entry)))
+    } catch (cause) {
+      if (isPresetMissing(cause)) {
+        setPresetNotice(copy.presets.missing)
+        await loadPresets()
+      } else if (needsFreshSession(cause)) {
+        // A blank conversation carries nothing worth confirming away.
+        if (rows.length === 0) {
+          setPresetBusy(false)
+          await startSessionWithPreset(entry)
+          return
+        }
+        setPresetLocked(entry)
+      } else {
+        setPresetNotice(copy.presets.failed(cause instanceof Error ? cause.message : String(cause)))
+      }
+    } finally {
+      setPresetBusy(false)
+    }
+  }
+
+  /** Start a fresh conversation composed from one preset (the locked-switch recovery). */
+  async function startSessionWithPreset(entry: AgentPresetEntry): Promise<void> {
+    if (sessionSwitchBlocked || sessionChangingRef.current) return
+    setPresetLocked(null)
+    setPresetBusy(true)
+    const transition = beginSessionTransition()
+    try {
+      await api.rebindTabAffinity()
+      if (sessionTransitionRef.current !== transition) return
+      sessionRef.current = null
+      setSessionTitle(null)
+      prepareSessionSwitch(false)
+      await createSession(transition, entry.id)
+      setShowPresetPicker(false)
+      setPresetNotice(copy.presets.switched(presetLabel(entry)))
+    } catch (cause) {
+      if (sessionTransitionRef.current === transition) {
+        setError(cause instanceof Error ? cause.message : String(cause))
+      }
+    } finally {
+      setPresetBusy(false)
+      finishSessionTransition(transition)
+    }
   }
 
   /** Restore the last browser conversation, then the latest durable one, before creating a chat. */
@@ -951,6 +1245,7 @@ export function App(): React.JSX.Element {
             sessionRef.current = id
             await api.setActiveSession(id)
             setSessionTitle(entry === undefined ? null : projectedSessionTitle(entry) ?? sessionDisplayTitle(entry))
+            setPresetId(entry?.agentPreset ?? null)
             applyHistory(id, history)
             return
           } catch {
@@ -1002,6 +1297,7 @@ export function App(): React.JSX.Element {
       prepareSessionSwitch(runtime.running, runtime.questions)
       sessionRef.current = entry.sessionId
       setSessionTitle(projectedSessionTitle(entry) ?? sessionDisplayTitle(entry))
+      setPresetId(entry.agentPreset ?? null)
       await refreshHistory(entry.sessionId)
     } catch (cause) {
       if (sessionTransitionRef.current === transition) {
@@ -1127,6 +1423,9 @@ export function App(): React.JSX.Element {
     setQuestionSubmissions([])
     setError(null)
     setShowSessionPicker(false)
+    setShowPresetPicker(false)
+    setPresetLocked(null)
+    setPresetNotice(null)
   }
 
   async function addImageFiles(files: readonly File[]): Promise<void> {
@@ -1510,6 +1809,20 @@ export function App(): React.JSX.Element {
   const approvalDialog = !approvalReadyForSession(queuedApproval, sessionRef.current, sessionChanging)
     ? null
     : <ApprovalDialog request={queuedApproval!} onDecision={decideApproval} copy={copy} />
+  const permissionDialog = permissionRequest === null
+    ? null
+    : (
+      <PermissionDialog
+        key={permissionRequest.id}
+        request={permissionRequest}
+        copy={copy}
+        onSettled={(granted) => {
+          api.respondToPermission(permissionRequest.id, granted)
+          setDebuggerGranted(granted)
+          setPermissionRequest(null)
+        }}
+      />
+    )
 
   if (showSettings) {
     return (
@@ -1568,6 +1881,21 @@ export function App(): React.JSX.Element {
               onChange={(event) => setSettings((current) => current === null
                 ? current
                 : { ...current, approvalNotifications: event.target.checked })}
+            />
+            <span className="setting-toggle-control" aria-hidden="true"><span /></span>
+          </label>
+          <label className="setting-toggle">
+            <span className="setting-toggle-copy">
+              <strong>{copy.settings.autoApproveActions}</strong>
+              <small>{copy.settings.autoApproveActionsHelp}</small>
+            </span>
+            <input
+              className="setting-toggle-input"
+              type="checkbox"
+              checked={settings?.autoApproveActions ?? true}
+              onChange={(event) => setSettings((current) => current === null
+                ? current
+                : { ...current, autoApproveActions: event.target.checked })}
             />
             <span className="setting-toggle-control" aria-hidden="true"><span /></span>
           </label>
@@ -1683,6 +2011,28 @@ export function App(): React.JSX.Element {
           ))}
           {relayNotice !== null && <p className="hint">{relayNotice}</p>}
         </section>
+        <section className="trusted-origins" aria-labelledby="verification-permission-title">
+          <div>
+            <span id="verification-permission-title">{copy.permission.settingLabel}</span>
+            <small>{copy.permission.settingHelp}</small>
+          </div>
+          <div className="permission-state">
+            <code className={debuggerGranted ? 'granted' : undefined}>
+              {debuggerGranted ? copy.permission.granted : copy.settings.sharingOff}
+            </code>
+            <button
+              onClick={() => {
+                // Both directions must run in this handler: Chrome requires a
+                // user gesture for a request, and a revoke should feel as
+                // immediate as the grant did.
+                const change = debuggerGranted
+                  ? chrome.permissions.remove({ permissions: ['debugger'] }).then(() => false)
+                  : chrome.permissions.request({ permissions: ['debugger'] })
+                void change.then(setDebuggerGranted, () => {})
+              }}
+            >{debuggerGranted ? copy.permission.revoke : copy.permission.grant}</button>
+          </div>
+        </section>
         <section className="trusted-origins" aria-labelledby="trusted-origins-title">
           <div>
             <span id="trusted-origins-title">{copy.settings.trustedOrigins}</span>
@@ -1714,7 +2064,7 @@ export function App(): React.JSX.Element {
           <button className="secondary" onClick={() => setShowSettings(false)}>{copy.settings.cancel}</button>
         </div>
         <p className="hint">{copy.settings.snapshotHint(caps?.snapshotMaxChars ?? DEFAULT_SNAPSHOT_MAX_CHARS)}</p>
-      </div>{approvalDialog}</>
+      </div>{approvalDialog}{permissionDialog}</>
     )
   }
 
@@ -1742,6 +2092,20 @@ export function App(): React.JSX.Element {
         </div>
       </header>
       <TabAffinityBanner state={tabAffinity} copy={copy} onDecision={decideTabAffinity} />
+      <PresetBar
+        presets={presets}
+        presetId={presetId}
+        open={showPresetPicker}
+        busy={presetBusy}
+        locked={presetLocked}
+        notice={presetNotice}
+        disabled={state !== 'connected' || presetBusy || sessionChanging}
+        copy={copy}
+        onToggle={() => { void openPresetPicker() }}
+        onChoose={(entry) => { void choosePreset(entry) }}
+        onStartWith={(entry) => { void startSessionWithPreset(entry) }}
+        onDismissLocked={() => setPresetLocked(null)}
+      />
       {showSessionPicker && (
         <section className="session-picker" aria-label={copy.app.sessions}>
           <div className="session-picker-head">
@@ -1918,6 +2282,6 @@ export function App(): React.JSX.Element {
           </div>
         </div>
       </footer>
-    </div>{approvalDialog}</>
+    </div>{approvalDialog}{permissionDialog}</>
   )
 }

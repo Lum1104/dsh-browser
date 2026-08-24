@@ -31,7 +31,7 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import { createApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import * as BridgeBrowser from '../src/index.ts'
-import { BRIDGE_PATH, type BridgeFrame } from '../src/protocol.ts'
+import { BRIDGE_PATH, DEFAULT_SNAPSHOT_MAX_CHARS, type BridgeFrame } from '../src/protocol.ts'
 
 const BRIDGE = '@yuxianglin/dsh-bridge-browser'
 const TOKEN = 'abcdabcdabcdabcdabcdabcdabcdabcd'
@@ -183,9 +183,15 @@ describe('real Loader composition', () => {
     const client = await connect(port)
     send(client.ws, { t: 'hello', token: '', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
     await waitFor(() => client.frames.some((f) => f.t === 'hello.ok'))
+    // The host echoes ITS OWN negotiated budgets, not the client's proposal:
+    // the extension must render to the deployment's limits, not its own.
     expect(client.frames.find((f) => f.t === 'hello.ok')).toEqual({
       t: 'hello.ok',
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
+      caps: {
+        textOnly: true,
+        snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS,
+        maxInteractiveItems: 200,
+      },
     })
 
     // Gateway RPC round-trip against the real session store.

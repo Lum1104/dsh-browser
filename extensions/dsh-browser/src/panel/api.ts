@@ -82,7 +82,18 @@ interface SessionResumeHintMessage {
   sessionId: string | null
 }
 
-type BackgroundMessage = RpcResultMessage | RespondResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | SelectionMessage | SessionResumeHintMessage
+/**
+ * The background asking the panel to obtain an optional Chrome permission.
+ * `chrome.permissions.request` only works inside a user gesture in an
+ * extension page, which the service worker is not — so the panel owns the ask.
+ */
+interface PermissionRequestMessage {
+  type: 'permission.request'
+  id: string
+  permission: chrome.runtime.ManifestPermissions
+}
+
+type BackgroundMessage = RpcResultMessage | RespondResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | SelectionMessage | SessionResumeHintMessage | PermissionRequestMessage
 
 /** Structured gateway failure retained for product-level error handling. */
 export class PanelRpcError extends Error {
@@ -104,6 +115,12 @@ function panelRpcError(failure: RpcFailurePayload | undefined, fallbackMessage: 
   )
 }
 
+/** One optional permission the background needs the user to grant. */
+export interface PermissionRequest {
+  id: string
+  permission: chrome.runtime.ManifestPermissions
+}
+
 /** The panel API surface. */
 export interface PanelApi {
   rpc<T = unknown>(method: string, payload?: unknown): Promise<T>
@@ -115,6 +132,8 @@ export interface PanelApi {
   onTabAffinity(callback: (state: TabAffinityState) => void): () => void
   onSelection(callback: (selection: PageSelection | null) => void): () => void
   onSessionResumeHint(callback: (sessionId: string | null) => void): () => void
+  onPermissionRequest(callback: (request: PermissionRequest) => void): () => void
+  respondToPermission(id: string, granted: boolean): Promise<void>
   respondToApproval(id: string, decision: ApprovalDecision): Promise<void>
   resolveTabAffinity(revision: number, decision: TabAffinityDecision, sessionId: string | null): Promise<void>
   rebindTabAffinity(): Promise<void>
@@ -146,6 +165,7 @@ export function connectPanel(): PanelApi {
   const tabAffinityListeners = new Set<(state: TabAffinityState) => void>()
   const selectionListeners = new Set<(selection: PageSelection | null) => void>()
   const sessionResumeHintListeners = new Set<(sessionId: string | null) => void>()
+  const permissionListeners = new Set<(request: PermissionRequest) => void>()
 
   let port: chrome.runtime.Port | null = null
   let reconnectPromise: Promise<chrome.runtime.Port> | null = null
@@ -212,6 +232,9 @@ export function connectPanel(): PanelApi {
       }
       case 'session.resume-hint':
         for (const listener of sessionResumeHintListeners) listener(msg.sessionId)
+        break
+      case 'permission.request':
+        for (const listener of permissionListeners) listener({ id: msg.id, permission: msg.permission })
         break
     }
   }
@@ -379,6 +402,13 @@ export function connectPanel(): PanelApi {
     onSessionResumeHint(callback) {
       sessionResumeHintListeners.add(callback)
       return () => { sessionResumeHintListeners.delete(callback) }
+    },
+    onPermissionRequest(callback) {
+      permissionListeners.add(callback)
+      return () => { permissionListeners.delete(callback) }
+    },
+    respondToPermission(id, granted) {
+      return send({ type: 'permission.response', id, granted })
     },
     respondToApproval(id, decision) {
       return send({ type: 'approval.response', id, decision })

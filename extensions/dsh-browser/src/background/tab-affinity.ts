@@ -207,6 +207,29 @@ export class TabAffinityController {
     return true
   }
 
+  /**
+   * Bind control to a tab the MODEL asked for (an approved `browser_tabs`
+   * open/switch), which is not necessarily the tab the user is looking at.
+   *
+   * The user's own view is left alone and recorded as kept, so the resulting
+   * state is `background` — "the assistant works on this page while you look at
+   * that one" — rather than `handoff`, which would immediately block the very
+   * tool calls the switch was requested for. A handoff still happens later if
+   * the user then moves to a third tab, because `observeActive` clears the kept
+   * marker on any change they make themselves.
+   *
+   * @param tab - the tab to control.
+   * @returns true, so callers persist and broadcast unconditionally.
+   */
+  bindTool(tab: AffinityTab): boolean {
+    this.controlled = { ...tab }
+    this.hasBound = true
+    this.lost = false
+    this.keptActiveTabId = this.active !== null && this.active.tabId !== tab.tabId ? this.active.tabId : null
+    this.revision += 1
+    return true
+  }
+
   /** Rehydrate a still-live controlled tab after an MV3 worker restart. */
   restoreControlled(tab: AffinityTab): boolean {
     if (this.controlled !== null || this.hasBound || this.lost) return false

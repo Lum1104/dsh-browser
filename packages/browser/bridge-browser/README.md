@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-The **browser-operation bridge** for dsh: mounts a token-authenticated WebSocket carrier (`/ext/bridge`) that the Chrome extension connects to, proxies gateway RPCs through the same fetch handler the `/api` surface uses, pumps session events per connection, and registers the text-only `browser_*` tool set that reads and operates the user's active tab through the extension — click elements, fill forms, scroll, and navigate in the real browser, login state preserved. The side panel is the conversation entry; the tools are the product.
+The **browser-operation bridge** for dsh: mounts a token-authenticated WebSocket carrier (`/ext/bridge`) that the Chrome extension connects to, proxies gateway RPCs through the same fetch handler the `/api` surface uses, pumps session events per connection, and registers the `browser_*` tool set that reads and operates the user's active tab through the extension — find and click elements, fill forms, batch a whole flow, scroll, navigate, manage tabs, and capture what the page looks like, all in the real browser with login state preserved. The side panel is the conversation entry; the tools are the product.
 
 **Text-only browser tools, multimodal chat passthrough**: page snapshots stay structured text (title, main content, numbered interactive inventory, and masked form fields), and every browser action uses stable inventory numbers. The generic RPC carrier also passes dsh 0.1.1 image prompts and durable attachment reads; deferred new sessions expose image limits only when the host actually mounts the attachment service.
 
@@ -69,14 +69,28 @@ Each `respond` carries a globally unique transport id as well as the host intera
 | `browser_snapshot` | Structured text snapshot (title/URL/main/inventory/forms); `delta: true` returns only changes. |
 | `browser_click` / `browser_type` / `browser_press` | Operate inventory items by stable index. |
 | `browser_scroll` / `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | Page movement. |
-| `browser_get_text` / `browser_wait` | Read regions / settle detection. |
+| `browser_get_text` / `browser_wait` | Read regions / settle detection, or block until text or a selector appears or disappears. |
+| `browser_find` | Locate elements by text, accessible name, role, or selector and return action indices, without a full snapshot. |
+| `browser_act` | Run up to `maxBatchSteps` page actions in one round trip; stops at the first failure or at a navigating step. |
+| `browser_select_option` / `browser_hover` | Dropdown selection by label or value; pointer hover for menus and tooltips. |
+| `browser_tabs` | List tabs, open a URL in a new tab, move browser control, or close a tab. Approved like an action. |
+| `browser_expand` | Reveal content behind disclosure controls and lazy loading before reading a page. |
+| `browser_search` / `browser_read_pages` | Proactive work in BACKGROUND tabs: a query's result links, or up to 8 pages digested in one call. The controlled tab is never navigated; one approval prompt names every destination origin. |
+| `browser_download` / `browser_downloads` | `chrome.downloads` with the extension as initiator, so a batch bypasses the page's multiple-download gate. |
+| `browser_verify` | Trusted click on a human-verification checkbox, behind the extension's OPTIONAL `debugger` permission. |
+| `browser_screenshot` / `browser_read_image` | Return real images. Registered ONLY when `ctx.attachments` is composed and `imageCapture` is on; each call also proves the live model route declares `image` input, and degrades to text when it does not. |
 
 ## Model Experience
 
-- **Token effect**: one `browser_snapshot` (default 32k chars) costs roughly 8–10k tokens for typical English text; the exact count depends on language and tokenizer, and delta snapshots cost a fraction of that. The system-prompt section tells the model to snapshot on demand rather than hoard page text.
+- **No silent loss**: `browser_get_text` and `browser_read_pages` return a WINDOW — text plus `[showing characters A-B of TOTAL; N remain — continue with <call>]`. A cut always carries the way back to the rest, so the model never has to infer what it did not see. `browser_snapshot({ full: true })` reads the whole body instead of the main-content heuristic, which by construction picks one container and can drop siblings.
+- **Budgets** (plugin config): `snapshotMaxChars` 96000, `maxInteractiveItems` 200, per-page read 24000 (max 120000), one text window 40000 (max 200000). Sized for a large-context route; lower them for a small one.
+- **Token effect**: one `browser_snapshot` (default 96k chars) costs roughly 25–30k tokens for typical English text; the exact count depends on language and tokenizer, and delta snapshots cost a fraction of that. The system-prompt section tells the model to snapshot on demand rather than hoard page text.
 - **KV-cache effect**: none beyond ordinary tool results; snapshots are not cached server-side.
 - **Latency**: each action awaits the extension's real-page execution plus settle detection (typically 0.2–2s; navigation up to 5s).
 - **Failure modes**: `bridge-closed` (extension not connected), `timeout`, `no-active-tab`, `content-unavailable` (page needs a refresh), `action-failed` (stale inventory index — the model should re-snapshot).
+- **Images**: bytes cross the wire as base64 on the tool result and are committed to `ctx.attachments` before `render` projects an `ImageBlock`, so a replayed transcript resolves the same reference. The extension downscales to the `hello.ok` budget (long edge 1568px, 4 MiB, 2 per call by default, tightened by the host's own `imageLimits`). Anything that cannot be stored or sent degrades to the action's text status plus one sentence saying why.
+- **Agent presets**: `agentPreset.list` and `agentPreset.select` pass through to the gateway. Because `session.create` is deferred, a preset chosen before the first message is recorded on the pending create payload and applied when the session materializes.
+- **Proactive tools and consent**: search, multi-page reading, and downloads visit URLs the USER did not choose, in the user's own browser session, so they are authorized as actions even though they never touch the controlled page — with one prompt per call listing every destination origin, and no per-origin "trust" shortcut. `browser_verify` always prompts, because it attaches the browser debugger for the duration of one real mouse event.
 
 ## Extension points
 

@@ -4,9 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
 import type { MuxFrame, RpcRequest } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
-import { BridgeServer, BridgeToolError, isLoopbackAddress, messageToText, payloadCode, payloadMessage } from '../src/server.ts'
-import { BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, type BridgeFrame } from '../src/protocol.ts'
-import { SessionPurgeError } from '../src/session-purge.ts'
+import { BridgeServer, BridgeToolError, isExtensionOrigin, isLoopbackAddress, messageToText, payloadCode, payloadMessage } from '../src/server.ts'
 
 const TOKEN = 'deadbeefdeadbeefdeadbeefdeadbeef'
 
@@ -770,5 +768,25 @@ describe('BridgeServer', () => {
     const countBefore = frames.filter((f) => f.t === 'event').length
     await new Promise((resolve) => { setTimeout(resolve, 80) })
     expect(frames.filter((f) => f.t === 'event').length).toBe(countBefore)
+  })
+})
+
+describe('isExtensionOrigin', () => {
+  it('accepts every Chromium extension origin, Edge included', () => {
+    // Edge, Chrome, and every other Chromium browser serve extensions from the
+    // same scheme, so one gate covers them all.
+    expect(isExtensionOrigin('chrome-extension://jkojepofahhclkdbidfedlfpmfhnjeko')).toBe(true)
+    expect(isExtensionOrigin('CHROME-EXTENSION://ABCDEF')).toBe(true)
+    expect(isExtensionOrigin('extension://abcdef')).toBe(true)
+    expect(isExtensionOrigin('moz-extension://abcdef')).toBe(true)
+  })
+
+  it('refuses page origins, a bare scheme, and a missing header', () => {
+    expect(isExtensionOrigin('https://evil.example')).toBe(false)
+    expect(isExtensionOrigin('http://127.0.0.1:3080')).toBe(false)
+    expect(isExtensionOrigin('chrome-extension://')).toBe(false)
+    expect(isExtensionOrigin('file://')).toBe(false)
+    expect(isExtensionOrigin(undefined)).toBe(false)
+    expect(isExtensionOrigin('')).toBe(false)
   })
 })

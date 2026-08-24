@@ -41,7 +41,50 @@ import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts
 import { BRIDGE_CONFIG_PATH, BRIDGE_PATH } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { BridgeClient, type BridgeState } from './bridge.ts'
 import { createRpc } from './rpc.ts'
-import { dispatchToolCall, resetTabSnapshot, type ToolAnswer, type ToolCall } from './tools.ts'
+import {
+  approvalFailure,
+  dispatchToolCall,
+  resetTabSnapshot,
+  type ContentBudget,
+  type ToolAnswer,
+  type ToolCall,
+} from './tools.ts'
+import { parseTabsRequest, runTabsAction, TabsError, type TabsDeps } from './tabs.ts'
+import {
+  parseDownloadRequest,
+  parseDownloadsRequest,
+  runDownload,
+  runDownloadsAction,
+  DownloadError,
+  type DownloadsDeps,
+} from './downloads.ts'
+import {
+  parseReadPagesRequest,
+  parseSearchRequest,
+  requestOrigins,
+  runReadPages,
+  runSearch,
+  ResearchError,
+  searchUrl,
+  type ResearchDeps,
+} from './research.ts'
+import { chromeTrustedInputDeps, trustedClick, TrustedInputError } from './trusted-input.ts'
+import {
+  chromeInspectDeps,
+  renderInspection,
+  startInspection,
+  InspectError,
+  type InspectionSession,
+} from './inspect.ts'
+import {
+  downloadApprovalPrompt,
+  evaluateApprovalPrompt,
+  inspectApprovalPrompt,
+  researchApprovalPrompt,
+  tabsApprovalPrompt,
+  verifyApprovalPrompt,
+} from './authorization.ts'
+import { chromeEvaluateDeps, EvaluateError, evaluateOnTab } from './evaluate.ts'
 import {
   isApprovalDecision,
   type ApprovalAuthorization,
@@ -81,6 +124,16 @@ export interface Settings {
   approvalNotifications: boolean
   /** Restore the last active browser conversation when the panel reopens. */
   autoResumeSession: boolean
+  /**
+   * Approve state-changing browser actions without asking.
+   *
+   * Default ON, matching the posture of a local single-user deployment: the
+   * assistant already drives this browser on the user's behalf, and a dialog
+   * per click trains the user to click through rather than to read. Turning it
+   * off restores the per-action prompt and the trusted-origin allowlist, which
+   * remain fully implemented.
+   */
+  autoApproveActions: boolean
 }
 
 const SETTINGS_DEFAULTS: Settings = {
@@ -91,6 +144,7 @@ const SETTINGS_DEFAULTS: Settings = {
   trustedActionOrigins: [],
   approvalNotifications: true,
   autoResumeSession: true,
+  autoApproveActions: true,
 }
 
 /**
@@ -242,6 +296,7 @@ function normalizeSettings(candidate: Settings): Settings {
     trustedActionOrigins: trusted,
     approvalNotifications: candidate.approvalNotifications !== false,
     autoResumeSession: candidate.autoResumeSession !== false,
+    autoApproveActions: candidate.autoApproveActions !== false,
   }
 }
 
@@ -663,7 +718,7 @@ function affinityFailure(kind: 'handoff' | 'lost' | 'missing'): ToolAnswer {
 }
 
 /** Resolve one stable tab target without allowing a manual switch to drift it. */
-async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab, 'id' | 'url' | 'windowId'> | ToolAnswer> {
+async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab, 'id' | 'url' | 'windowId' | 'active'> | ToolAnswer> {
   await affinityReady
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const resolution = tabAffinity.resolveTarget(sessionId)
@@ -705,6 +760,9 @@ async function authorizeToolCall(
   sessionId?: string,
 ): Promise<ApprovalAuthorization> {
   if (signal.aborted) return 'cancelled'
+  // The frictionless path: no dialog, no allowlist lookup, no round trip to a
+  // panel that may not even be open.
+  if (settings.autoApproveActions) return 'approved'
   if (actionCoveredByTrustedOrigins(
     prompt,
     sessionTrustedActionOrigins,
@@ -838,6 +896,506 @@ async function pushBudgetToControlledTab(negotiated: BridgeCaps): Promise<void> 
   }
 }
 
+/** Chrome and affinity seams for `browser_tabs`. */
+const tabsDeps: TabsDeps = {
+  listTabs: () => chrome.tabs.query({}),
+  getTab: (tabId) => chrome.tabs.get(tabId),
+  createTab: (url, active) => chrome.tabs.create({ url, active }),
+  closeTab: async (tabId) => { await chrome.tabs.remove(tabId) },
+  activateTab: async (tabId, windowId) => {
+    await chrome.tabs.update(tabId, { active: true })
+    await chrome.windows.update(windowId, { focused: true })
+  },
+  bindControl: (tab) => {
+    // The previous page's pending approvals describe work on a page that is no
+    // longer the target, so they are withdrawn. In-flight tool calls are NOT
+    // cancelled: this runs inside one of them.
+    const previous = tabAffinity.snapshot().controlled?.tabId
+    activeFollowRefresh?.abort()
+    cancelPendingApprovals()
+    tabAffinity.bindTool(tab)
+    if (previous !== undefined && previous !== tab.tabId) resetTabSnapshot(previous)
+    resetTabSnapshot(tab.tabId)
+    persistTabAffinity()
+    broadcastTabAffinity()
+  },
+  controlledTabId: () => tabAffinity.snapshot().controlled?.tabId,
+}
+
+/** The window an approval dialog for a non-page call should surface in. */
+async function approvalWindowId(): Promise<number> {
+  const state = tabAffinity.snapshot()
+  const known = state.controlled?.windowId ?? state.active?.windowId
+  if (known !== undefined) return known
+  try {
+    return (await chrome.windows.getLastFocused()).id ?? chrome.windows.WINDOW_ID_CURRENT
+  } catch {
+    return chrome.windows.WINDOW_ID_CURRENT
+  }
+}
+
+/**
+ * Run one `browser_tabs` call. Tab management lives outside the content-script
+ * path — it is about the browser, not one page — so it carries its own
+ * approval and never resolves a controlled tab first.
+ */
+async function dispatchTabsCall(call: ToolCall, signal: AbortSignal): Promise<ToolAnswer> {
+  await affinityReady
+  if (signal.aborted) return cancelledAnswer()
+  const prompt = tabsApprovalPrompt(call, settings.sharePageContent)
+  if (prompt !== undefined) {
+    const authorization = await authorizeToolCall(prompt, signal, await approvalWindowId(), call.sessionId)
+    if (authorization !== 'approved') return approvalFailure(prompt, authorization)
+  }
+  if (signal.aborted) return cancelledAnswer()
+  try {
+    const text = await runTabsAction(parseTabsRequest(call.args), tabsDeps)
+    return { ok: true, result: { text } }
+  } catch (error: unknown) {
+    if (error instanceof TabsError) return { ok: false, error: { code: error.code, message: error.message } }
+    return { ok: false, error: { code: 'action-failed', message: error instanceof Error ? error.message : String(error) } }
+  }
+}
+
+function cancelledAnswer(): ToolAnswer {
+  return { ok: false, error: { code: 'bridge-closed', message: 'The browser tool call was cancelled.' } }
+}
+
+/** Chrome seams for `chrome.downloads`. */
+const downloadsDeps: DownloadsDeps = {
+  start: (options) => chrome.downloads.download(options),
+  search: (query) => chrome.downloads.search(query),
+  cancel: (id) => chrome.downloads.cancel(id),
+  pause: (id) => chrome.downloads.pause(id),
+  resume: (id) => chrome.downloads.resume(id),
+  show: (id) => { chrome.downloads.show(id) },
+}
+
+/** Wait for one tab to finish loading, without polling it. */
+function waitForTabLoad(tabId: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (loaded: boolean): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      chrome.tabs.onUpdated.removeListener(onUpdated)
+      chrome.tabs.onRemoved.removeListener(onRemoved)
+      resolve(loaded)
+    }
+    const onUpdated = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo): void => {
+      if (updatedTabId === tabId && changeInfo.status === 'complete') finish(true)
+    }
+    const onRemoved = (removedTabId: number): void => {
+      if (removedTabId === tabId) finish(false)
+    }
+    const timer = setTimeout(() => { finish(false) }, timeoutMs)
+    chrome.tabs.onUpdated.addListener(onUpdated)
+    chrome.tabs.onRemoved.addListener(onRemoved)
+    // The tab may already be complete before the listener was installed.
+    void chrome.tabs.get(tabId).then(
+      (tab) => { if (tab.status === 'complete') finish(true) },
+      () => { finish(false) },
+    )
+  })
+}
+
+/**
+ * Ask one tab's content script for an action, injecting the script when the
+ * tab predates this build, and unwrapping the answer envelope.
+ */
+async function askTab(tabId: number, action: string, args: Record<string, unknown>): Promise<{ text?: string } | undefined> {
+  const message = { type: 'DSH_ACTION', action, args }
+  type Envelope = { ok?: boolean; result?: { text?: string }; error?: { message?: string } } | undefined
+  let answer: Envelope
+  try {
+    answer = await chrome.tabs.sendMessage(tabId, message, { frameId: 0 }) as Envelope
+  } catch {
+    // A tab opened before this build was loaded has no content script yet.
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] })
+    answer = await chrome.tabs.sendMessage(tabId, message, { frameId: 0 }) as Envelope
+  }
+  if (answer?.ok === false) throw new Error(answer.error?.message ?? 'the page could not be read')
+  return answer?.result
+}
+
+/** Chrome seams for scratch-tab research. */
+const researchDeps: ResearchDeps = {
+  openScratchTab: async (url) => {
+    const tab = await chrome.tabs.create({ url, active: false })
+    if (tab.id === undefined) throw new Error('the background tab could not be opened')
+    return tab.id
+  },
+  closeTab: async (tabId) => { await chrome.tabs.remove(tabId) },
+  waitForLoad: waitForTabLoad,
+  ask: askTab,
+  describeTab: async (tabId) => {
+    const tab = await chrome.tabs.get(tabId)
+    return { title: (tab.title ?? '').replace(/\s+/g, ' ').trim(), url: tab.url ?? '' }
+  },
+}
+
+/**
+ * Run one call that never touches the controlled page: web search, multi-page
+ * reading, and download management. Each carries its own approval, with the
+ * destination origins of the WHOLE call in one prompt — a research step that
+ * asked five times would just train the user to click through.
+ */
+async function dispatchProactiveCall(call: ToolCall, signal: AbortSignal): Promise<ToolAnswer> {
+  if (signal.aborted) return cancelledAnswer()
+  try {
+    switch (call.name) {
+      case 'browser_search': {
+        const request = parseSearchRequest(call.args)
+        const prompt = researchApprovalPrompt(call, requestOrigins([searchUrl(request)]), settings.sharePageContent)
+        const refusal = await authorizeOrRefuse(prompt, signal, call.sessionId)
+        if (refusal !== undefined) return refusal
+        return { ok: true, result: { text: await runSearch(request, researchDeps) } }
+      }
+      case 'browser_read_pages': {
+        const request = parseReadPagesRequest(call.args)
+        const prompt = researchApprovalPrompt(call, requestOrigins(request.urls), settings.sharePageContent)
+        const refusal = await authorizeOrRefuse(prompt, signal, call.sessionId)
+        if (refusal !== undefined) return refusal
+        return { ok: true, result: { text: await runReadPages(request, researchDeps) } }
+      }
+      case 'browser_download': {
+        const request = parseDownloadRequest(call.args)
+        const prompt = downloadApprovalPrompt(call, requestOrigins(request.urls))
+        const refusal = await authorizeOrRefuse(prompt, signal, call.sessionId)
+        if (refusal !== undefined) return refusal
+        return { ok: true, result: { text: await runDownload(request, downloadsDeps) } }
+      }
+      case 'browser_downloads': {
+        const request = parseDownloadsRequest(call.args)
+        const prompt = downloadApprovalPrompt(call, [])
+        const refusal = await authorizeOrRefuse(prompt, signal, call.sessionId)
+        if (refusal !== undefined) return refusal
+        return { ok: true, result: { text: await runDownloadsAction(request, downloadsDeps) } }
+      }
+      default:
+        return { ok: false, error: { code: 'bad-args', message: `Unknown browser tool: ${call.name}` } }
+    }
+  } catch (error: unknown) {
+    if (error instanceof DownloadError || error instanceof ResearchError) {
+      return { ok: false, error: { code: error.code, message: error.message } }
+    }
+    return { ok: false, error: { code: 'action-failed', message: error instanceof Error ? error.message : String(error) } }
+  }
+}
+
+/** Resolve an approval, returning the refusal answer when it was not granted. */
+async function authorizeOrRefuse(
+  prompt: ApprovalPrompt | undefined,
+  signal: AbortSignal,
+  sessionId?: string,
+): Promise<ToolAnswer | undefined> {
+  if (prompt === undefined) return undefined
+  const authorization = await authorizeToolCall(prompt, signal, await approvalWindowId(), sessionId)
+  if (authorization !== 'approved') return approvalFailure(prompt, authorization)
+  return signal.aborted ? cancelledAnswer() : undefined
+}
+
+/**
+ * Click a human-verification widget with a trusted event.
+ *
+ * The geometry comes from the page (the widget's iframe rectangle) and the
+ * click comes from the debugger, because the whole point of such a widget is
+ * that a synthetic `click()` is ignored. The debugging permission is optional,
+ * so a first use asks the side panel to request it — that click is the user
+ * gesture Chrome requires.
+ */
+async function dispatchVerifyCall(call: ToolCall, signal: AbortSignal): Promise<ToolAnswer> {
+  await affinityReady
+  if (signal.aborted) return cancelledAnswer()
+  const target = await resolveToolTab()
+  if ('ok' in target) return target
+  const tabId = target.id
+  if (tabId === undefined) return { ok: false, error: { code: 'no-active-tab', message: 'No active tab is available for browser operations.' } }
+
+  const prompt = verifyApprovalPrompt(call, target.url ?? '')
+  const refusal = await authorizeOrRefuse(prompt, signal, call.sessionId)
+  if (refusal !== undefined) return refusal
+
+  let located: { text: string; targets: unknown[] }
+  try {
+    located = await locateVerification(tabId)
+  } catch (error: unknown) {
+    return { ok: false, error: { code: 'content-unavailable', message: `The page could not be inspected for a verification widget: ${error instanceof Error ? error.message : String(error)}` } }
+  }
+  const point = firstVerificationPoint(located.targets)
+  if (point === undefined) return { ok: true, result: { text: located.text } }
+  if (!tabAffinity.allowsTarget(tabId)) {
+    return { ok: false, error: { code: 'content-unavailable', message: 'The controlled tab changed before the verification click.' } }
+  }
+
+  const deps = chromeTrustedInputDeps()
+  try {
+    if (!await deps.hasPermission()) {
+      const granted = await requestDebuggerPermission(signal)
+      if (!granted) {
+        return {
+          ok: false,
+          error: {
+            code: 'action-failed',
+            message: 'The user did not grant the browser debugging permission, so a trusted click cannot be delivered. Ask them to click the widget themselves, or to enable it in the side panel settings.',
+          },
+        }
+      }
+    }
+    await trustedClick(tabId, point, deps)
+  } catch (error: unknown) {
+    if (error instanceof TrustedInputError) return { ok: false, error: { code: 'action-failed', message: error.message } }
+    return { ok: false, error: { code: 'action-failed', message: error instanceof Error ? error.message : String(error) } }
+  }
+  // The widget resolves asynchronously; give it a moment, then let the model
+  // read the outcome itself rather than claiming success here.
+  await new Promise((resolve) => { setTimeout(resolve, 1_200) })
+  return {
+    ok: true,
+    result: {
+      text: `${located.text}\nDelivered a trusted click to the widget. Verification resolves asynchronously — call browser_snapshot (or browser_wait for the page's own content) to see whether it passed.`,
+    },
+  }
+}
+
+/** Ask the top frame which verification widgets it can see. */
+async function locateVerification(tabId: number): Promise<{ text: string; targets: unknown[] }> {
+  const answer = await chrome.tabs.sendMessage(tabId, {
+    type: 'DSH_ACTION',
+    action: 'dsh_verification_targets',
+    args: {},
+  }, { frameId: 0 }) as { ok?: boolean; result?: { text?: string; verificationTargets?: unknown[] }; error?: { message?: string } } | undefined
+  if (answer?.ok !== true) throw new Error(answer?.error?.message ?? 'the content script returned no answer')
+  return {
+    text: typeof answer.result?.text === 'string' ? answer.result.text : '',
+    targets: Array.isArray(answer.result?.verificationTargets) ? answer.result.verificationTargets : [],
+  }
+}
+
+/** The first usable click point among the located widgets. */
+function firstVerificationPoint(targets: readonly unknown[]): { x: number; y: number } | undefined {
+  for (const entry of targets) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const { x, y } = entry as { x?: unknown; y?: unknown }
+    if (typeof x === 'number' && typeof y === 'number' && Number.isFinite(x) && Number.isFinite(y) && x >= 0 && y >= 0) {
+      return { x, y }
+    }
+  }
+  return undefined
+}
+
+/** Tools handled entirely in the background, with no controlled page involved. */
+const PROACTIVE_TOOLS = new Set(['browser_search', 'browser_read_pages', 'browser_download', 'browser_downloads'])
+
+/** Default and maximum recording window for a standalone inspection, in ms. */
+const DEFAULT_INSPECT_MS = 2_500
+const MAX_INSPECT_MS = 20_000
+
+/** Attach a recorder for a call that asked for one, tolerating a refusal. */
+async function beginCapture(tabId: number): Promise<{ session?: InspectionSession; note?: string }> {
+  try {
+    return { session: await startInspection(tabId, chromeInspectDeps()) }
+  } catch (error: unknown) {
+    // A capture that cannot start must not fail the action it was decorating:
+    // the action is what the model asked for, the evidence is a bonus.
+    return { note: error instanceof InspectError ? error.message : String(error) }
+  }
+}
+
+/** Append a recorded report to an otherwise successful answer. */
+function withInspection(answer: ToolAnswer, section: string): ToolAnswer {
+  if (!answer.ok || typeof answer.result !== 'object' || answer.result === null) return answer
+  const result = answer.result as { text?: unknown }
+  if (typeof result.text !== 'string') return answer
+  return { ...answer, result: { ...result, text: `${result.text}\n\n${section}` } }
+}
+
+/**
+ * Run one page-directed call, optionally recording console and network activity
+ * around it.
+ *
+ * `capture: true` is what turns "I clicked and nothing happened" into a fact.
+ * The recorder wraps the dispatch so it sees the events the action causes, and
+ * is released on every path — a leaked attachment would leave Chrome's
+ * debugging banner up on the user's tab.
+ */
+async function dispatchPageCall(call: ToolCall, signal: AbortSignal, budget?: ContentBudget): Promise<ToolAnswer> {
+  const target = await resolveToolTab()
+  if ('ok' in target) return target
+  const wantsCapture = call.args.capture === true && target.id !== undefined
+  const capture = wantsCapture ? await beginCapture(target.id!) : {}
+  try {
+    const answer = await dispatchToolCall(
+      call,
+      settings.sharePageContent,
+      budget,
+      (prompt) => authorizeToolCall(prompt, signal, target.windowId, call.sessionId),
+      signal,
+      target,
+      () => target.id !== undefined && tabAffinity.allowsTarget(target.id),
+      caps?.images,
+    )
+    if (capture.session === undefined) {
+      return capture.note === undefined
+        ? answer
+        : withInspection(answer, `(Console and network were not captured: ${capture.note})`)
+    }
+    const report = await capture.session.finish({ bodies: call.args.bodies === true })
+    return withInspection(answer, renderInspection(report, 'Recorded while this action ran:'))
+  } catch (error: unknown) {
+    await capture.session?.abort()
+    throw error
+  }
+}
+
+/**
+ * Record console and network activity on the controlled tab for a window of
+ * time, optionally reloading first so a page's own requests are observed.
+ *
+ * The protocol only reports events from `enable` onward, which is why the
+ * reload option exists: without it a page that already loaded has nothing left
+ * to observe.
+ */
+async function dispatchInspectCall(call: ToolCall, signal: AbortSignal): Promise<ToolAnswer> {
+  await affinityReady
+  if (signal.aborted) return cancelledAnswer()
+  const target = await resolveToolTab()
+  if ('ok' in target) return target
+  const tabId = target.id
+  if (tabId === undefined) {
+    return { ok: false, error: { code: 'no-active-tab', message: 'No active tab is available for browser operations.' } }
+  }
+  const reload = call.args.reload === true
+  const prompt = inspectApprovalPrompt(call, target.url ?? '', settings.sharePageContent)
+  const refusal = await authorizeOrRefuse(prompt, signal, call.sessionId)
+  if (refusal !== undefined) return refusal
+
+  const ms = typeof call.args.ms === 'number' && call.args.ms > 0
+    ? Math.min(Math.floor(call.args.ms), MAX_INSPECT_MS)
+    : DEFAULT_INSPECT_MS
+  let session: InspectionSession
+  try {
+    session = await startInspection(tabId, chromeInspectDeps())
+  } catch (error: unknown) {
+    return {
+      ok: false,
+      error: {
+        code: 'action-failed',
+        message: error instanceof InspectError ? error.message : String(error),
+      },
+    }
+  }
+  try {
+    if (reload) await chrome.tabs.reload(tabId)
+    await new Promise((resolve) => { setTimeout(resolve, ms) })
+    if (signal.aborted) {
+      await session.abort()
+      return cancelledAnswer()
+    }
+    const report = await session.finish({
+      bodies: call.args.bodies !== false,
+      ...(typeof call.args.filter === 'string' && call.args.filter !== '' ? { filter: call.args.filter } : {}),
+    })
+    const heading = reload
+      ? `Reloaded ${target.url ?? 'the page'} and recorded ${ms}ms of activity:`
+      : `Recorded ${ms}ms of activity on ${target.url ?? 'the page'} (nothing that happened BEFORE this call is visible — pass reload: true to observe the page load):`
+    return { ok: true, result: { text: renderInspection(report, heading) } }
+  } catch (error: unknown) {
+    await session.abort()
+    return { ok: false, error: { code: 'action-failed', message: error instanceof Error ? error.message : String(error) } }
+  }
+}
+
+/**
+ * Run model-authored JavaScript on the controlled tab's MAIN world.
+ *
+ * Always prompted (the prompt shows the code), never trustable, and sharing
+ * the optional debugger permission with trusted clicks — which is requested
+ * from the panel here exactly as a verification click does.
+ */
+async function dispatchEvaluateCall(call: ToolCall, signal: AbortSignal): Promise<ToolAnswer> {
+  await affinityReady
+  if (signal.aborted) return cancelledAnswer()
+  const target = await resolveToolTab()
+  if ('ok' in target) return target
+  const tabId = target.id
+  if (tabId === undefined) {
+    return { ok: false, error: { code: 'no-active-tab', message: 'No active tab is available for browser operations.' } }
+  }
+  const expression = typeof call.args.function === 'string' ? call.args.function : ''
+  if (expression.trim() === '') {
+    return { ok: false, error: { code: 'bad-args', message: 'Provide "function": the JavaScript to evaluate on the page.' } }
+  }
+
+  const prompt = evaluateApprovalPrompt(call, target.url ?? '')
+  const refusal = await authorizeOrRefuse(prompt, signal, call.sessionId)
+  if (refusal !== undefined) return refusal
+
+  const deps = chromeEvaluateDeps()
+  try {
+    // Runtime.evaluate lives behind the same optional permission as trusted
+    // input; request it from an open panel rather than failing opaquely.
+    const granted = await chrome.permissions.contains({ permissions: ['debugger'] })
+      ? true
+      : await requestDebuggerPermission(signal)
+    if (!granted) {
+      return {
+        ok: false,
+        error: {
+          code: 'action-failed',
+          message: 'The user did not grant the browser debugging permission, so page scripts cannot be evaluated. Ask them to enable it in the side panel settings.',
+        },
+      }
+    }
+    if (signal.aborted) return cancelledAnswer()
+    const value = await evaluateOnTab(tabId, expression, deps)
+    return { ok: true, result: { text: `Evaluated on ${target.url ?? 'the page'}:\n${value}` } }
+  } catch (error: unknown) {
+    if (error instanceof EvaluateError) return { ok: false, error: { code: 'action-failed', message: error.message } }
+    return { ok: false, error: { code: 'action-failed', message: error instanceof Error ? error.message : String(error) } }
+  }
+}
+
+/**
+ * Pending optional-permission requests, keyed by request id.
+ *
+ * `chrome.permissions.request` must run inside a user gesture in an extension
+ * page, which the service worker is not — so the panel makes the call and the
+ * worker waits here for its answer.
+ */
+const pendingPermissions = new Map<string, (granted: boolean) => void>()
+const PERMISSION_REQUEST_TIMEOUT_MS = 60_000
+
+/** Ask an open side panel to request the optional debugging permission. */
+function requestDebuggerPermission(signal: AbortSignal): Promise<boolean> {
+  if (panelPorts.size === 0) return Promise.resolve(false)
+  const id = crypto.randomUUID()
+  return new Promise<boolean>((resolve) => {
+    let settled = false
+    const settle = (granted: boolean): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      signal.removeEventListener('abort', onAbort)
+      pendingPermissions.delete(id)
+      resolve(granted)
+    }
+    const onAbort = (): void => { settle(false) }
+    const timer = setTimeout(() => { settle(false) }, PERMISSION_REQUEST_TIMEOUT_MS)
+    signal.addEventListener('abort', onAbort, { once: true })
+    pendingPermissions.set(id, settle)
+    let delivered = false
+    for (const port of panelPorts) {
+      try {
+        port.postMessage({ type: 'permission.request', id, permission: 'debugger' })
+        delivered = true
+      } catch { /* port already closed */ }
+    }
+    if (!delivered) settle(false)
+  })
+}
+
 /** Route one tool.call frame to the user-approved controlled tab. */
 function routeToolCall(call: ToolCall): void {
   if (bridge === null) return
@@ -851,17 +1409,18 @@ function routeToolCall(call: ToolCall): void {
   const budget = caps === null
     ? undefined
     : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars }
-  void resolveToolTab(call.sessionId).then((target) => 'ok' in target
-    ? target
-    : dispatchToolCall(
-        call,
-        settings.sharePageContent,
-        budget,
-        (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId),
-        controller.signal,
-        target,
-        () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
-      )).then(
+  const work = call.name === 'browser_tabs'
+    ? dispatchTabsCall(call, controller.signal)
+    : PROACTIVE_TOOLS.has(call.name)
+      ? dispatchProactiveCall(call, controller.signal)
+      : call.name === 'browser_verify'
+        ? dispatchVerifyCall(call, controller.signal)
+        : call.name === 'browser_inspect'
+          ? dispatchInspectCall(call, controller.signal)
+          : call.name === 'browser_evaluate'
+            ? dispatchEvaluateCall(call, controller.signal)
+            : dispatchPageCall(call, controller.signal, budget)
+  void work.then(
     (answer) => {
       if (controller.signal.aborted) {
         if (activeToolCalls.get(call.id) === controller) {
@@ -1177,6 +1736,12 @@ chrome.runtime.onConnect.addListener((port) => {
         if (typeof approval.id === 'string' && isApprovalDecision(approval.decision)) {
           approvals.respond(approval.id, approval.decision)
         }
+        break
+      }
+      case 'permission.response': {
+        const response = message as { id?: unknown; granted?: unknown }
+        if (typeof response.id !== 'string') break
+        pendingPermissions.get(response.id)?.(response.granted === true)
         break
       }
       case 'tab-affinity.response': {

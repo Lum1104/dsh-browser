@@ -68,6 +68,7 @@ describe('navigation action responses', () => {
   it('answers a link click before starting a potentially unloading navigation', async () => {
     vi.useFakeTimers()
     const link = document.createElement('a')
+    document.body.append(link)
     link.href = 'https://example.com/next'
     link.scrollIntoView = vi.fn()
     const dispatch = vi.spyOn(link, 'dispatchEvent').mockReturnValue(true)
@@ -86,6 +87,7 @@ describe('navigation action responses', () => {
   it('does not wait for a replacement document when a link opens a new tab', async () => {
     vi.useFakeTimers()
     const link = document.createElement('a')
+    document.body.append(link)
     link.href = 'https://example.com/next'
     link.target = '_blank'
     link.scrollIntoView = vi.fn()
@@ -104,6 +106,7 @@ describe('navigation action responses', () => {
   it('preserves native referrer policy without waiting for a guaranteed navigation', async () => {
     vi.useFakeTimers()
     const link = document.createElement('a')
+    document.body.append(link)
     link.href = 'https://example.com/private'
     link.rel = 'noreferrer'
     link.scrollIntoView = vi.fn()
@@ -125,6 +128,7 @@ describe('navigation action responses', () => {
   it('preserves hyperlink auditing without entering the replacement-document wait', async () => {
     vi.useFakeTimers()
     const link = document.createElement('a')
+    document.body.append(link)
     link.href = 'https://example.com/next'
     link.setAttribute('ping', 'https://audit.example/link')
     link.scrollIntoView = vi.fn()

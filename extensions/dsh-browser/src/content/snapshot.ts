@@ -10,7 +10,8 @@
  * @module
  */
 
-import { accessibleName, collectInteractive, isInViewport, mainText, pageText, truncate } from './extract.ts'
+import { accessibleName, collectInteractive, isInViewport, isVisible, mainText, pageText, truncate } from './extract.ts'
+import { imageUrlCandidates, isPlaceholderUrl } from './locate.ts'
 import { ElementIds } from './ids.ts'
 import { isSensitiveField, maskValue } from './privacy.ts'
 
@@ -56,6 +57,19 @@ interface FormFieldView {
   required?: boolean
 }
 
+/** One image on the page the model can ask to see. */
+interface ImageView {
+  index: number
+  name: string
+  /** Intrinsic size when loaded, else the rendered box. */
+  width: number
+  height: number
+  /** True when the browser has not fetched it yet (a lazy image below the fold). */
+  pending: boolean
+  /** Host plus file name of the best candidate, so near-identical images differ. */
+  source: string
+}
+
 /** One page snapshot. */
 export interface SnapshotView {
   version: number
@@ -65,14 +79,15 @@ export interface SnapshotView {
   main: string
   items: InventoryItem[]
   forms: FormFieldView[]
+  images: ImageView[]
   /** ids that changed since the last snapshot (delta mode). */
   changed: number[]
   /** ids that disappeared since the last snapshot (delta mode). */
   removed: number[]
   /** true when the inventory was renumbered (model should re-read ids). */
   reindexed: boolean
-  /** Budget accounting: characters cut from main text and items/forms dropped by count caps. */
-  truncated: { mainChars: number; itemsDropped: number; formsDropped: number }
+  /** Budget accounting: characters cut from main text and items/forms/images dropped by count caps. */
+  truncated: { mainChars: number; itemsDropped: number; formsDropped: number; imagesDropped: number }
   /** 总预算（渲染封顶用）。 */
   budgetChars: number
 }
@@ -82,12 +97,36 @@ export interface SnapshotBudget {
   maxItems: number
   maxForms: number
   maxChars: number
+  /** Images listed per snapshot. Absent falls back to {@link DEFAULT_MAX_IMAGES}. */
+  maxImages?: number
 }
+
+/** Default cap on listed images. */
+export const DEFAULT_MAX_IMAGES = 40
+
+/**
+ * Size floor for an image to be worth listing.
+ *
+ * Both a side minimum and an area minimum, because neither alone is right: a
+ * per-side floor drops wide banners that are genuinely content, and an area
+ * floor alone admits 4x600 divider rules. Below both an image is an icon, a
+ * spacer, or a tracking pixel, and listing those buries the real pictures.
+ */
+const MIN_LISTED_IMAGE_SIDE = 32
+const MIN_LISTED_IMAGE_AREA = 48 * 48
 
 /** Options for one snapshot build. */
 export interface SnapshotOptions {
   delta?: boolean
   region?: string
+  /**
+   * Read the whole document body instead of the main-content heuristic.
+   *
+   * The heuristic picks ONE container, so a page whose content is spread across
+   * siblings loses the rest silently — which is exactly the failure a model
+   * cannot detect. `full` trades density for completeness.
+   */
+  full?: boolean
   budget: SnapshotBudget
 }
 
@@ -156,6 +195,19 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
     items.push(item)
   }
 
+  // Images are not interactive, so they are absent from the inventory above —
+  // which meant the model could not tell a page HAD pictures, let alone ask to
+  // see one. They get their own numbered section, sharing the id registry so a
+  // listed index is directly usable with browser_read_image.
+  const imageElements = collectImages(document, options.budget.maxImages ?? DEFAULT_MAX_IMAGES)
+  if (imageElements.kept.length > 0) ids.assign([...elements, ...imageElements.kept])
+  const images: ImageView[] = []
+  for (const el of imageElements.kept) {
+    const index = ids.indexOf(el)
+    if (index === undefined) continue
+    images.push(imageView(index, el, nameOf(el)))
+  }
+
   // Form controls are already part of the visible interactive inventory, so
   // reuse that scan instead of querying, styling, and measuring them again.
   const formElements = elements.filter((el) => el instanceof HTMLInputElement
@@ -188,8 +240,13 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
   const regionEl = options.region !== undefined && options.region !== ''
     ? document.querySelector(options.region)
     : null
-  const mainSource = regionEl !== null ? pageText(regionEl) : mainText(document)
-  const mainBudget = Math.floor(options.budget.maxChars * 0.5)
+  const mainSource = regionEl !== null
+    ? pageText(regionEl)
+    : options.full === true ? pageText(document.body) : mainText(document)
+  // A full read is the caller asking for everything, so it gets most of the
+  // budget; the balanced split exists to keep the numbered inventory visible
+  // on a text-heavy page, not to ration the page itself.
+  const mainBudget = Math.floor(options.budget.maxChars * (options.full === true ? 0.8 : 0.6))
   const main = truncate(mainSource, mainBudget)
 
   const lastItems = last === null ? new Map<number, InventoryItem>() : new Map(last.items.map((item) => [item.index, item]))
@@ -213,6 +270,11 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
       const before = lastForms.get(form.index)
       if (before === undefined || !sameForm(before, form)) changed.add(form.index)
     }
+    const lastImages = new Map(last.images.map((image) => [image.index, image]))
+    for (const image of images) {
+      const before = lastImages.get(image.index)
+      if (before === undefined || !sameImage(before, image)) changed.add(image.index)
+    }
   }
 
   return {
@@ -223,6 +285,7 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
     main: main.text,
     items,
     forms,
+    images,
     changed: options.delta === true ? [...changed] : [],
     removed: options.delta === true ? removedIds : [],
     reindexed,
@@ -230,8 +293,62 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
       mainChars: main.truncated,
       itemsDropped: Math.max(0, elements.length - options.budget.maxItems),
       formsDropped: Math.max(0, formElements.length - options.budget.maxForms),
+      imagesDropped: imageElements.dropped,
     },
     budgetChars: options.budget.maxChars,
+  }
+}
+
+/**
+ * Pictures worth listing, in document order.
+ *
+ * Filtered by rendered size rather than by attribute, because a lazy image has
+ * no natural size yet but does occupy its box — and a tracking pixel occupies
+ * almost none however it is marked up.
+ */
+function collectImages(doc: Document, limit: number): { kept: Element[]; dropped: number } {
+  const kept: Element[] = []
+  let dropped = 0
+  for (const el of doc.querySelectorAll('img, canvas')) {
+    if (!isVisible(el)) continue
+    const rect = el.getBoundingClientRect()
+    if (rect.width < MIN_LISTED_IMAGE_SIDE || rect.height < MIN_LISTED_IMAGE_SIDE) continue
+    if (rect.width * rect.height < MIN_LISTED_IMAGE_AREA) continue
+    if (kept.length >= limit) {
+      dropped += 1
+      continue
+    }
+    kept.push(el)
+  }
+  return { kept, dropped }
+}
+
+/** Host and file name of the best candidate URL, for telling images apart. */
+function imageSourceLabel(el: Element): string {
+  const [best] = imageUrlCandidates(el)
+  if (best === undefined) return el.tagName.toLowerCase()
+  try {
+    const url = new URL(best)
+    const file = url.pathname.split('/').filter((part) => part !== '').pop() ?? ''
+    return truncate(`${url.host}/${decodeURIComponent(file)}`, 70).text
+  } catch {
+    return truncate(best, 70).text
+  }
+}
+
+function imageView(index: number, el: Element, name: string): ImageView {
+  const rect = el.getBoundingClientRect()
+  const loaded = el instanceof HTMLImageElement && el.naturalWidth > 0
+  const [best] = imageUrlCandidates(el)
+  return {
+    index,
+    name,
+    width: loaded ? (el as HTMLImageElement).naturalWidth : Math.round(rect.width),
+    height: loaded ? (el as HTMLImageElement).naturalHeight : Math.round(rect.height),
+    // Either the browser has not fetched it, or the only candidate IS a
+    // placeholder — both mean what is on screen is not the picture.
+    pending: (el instanceof HTMLImageElement && !loaded) || (best !== undefined && isPlaceholderUrl(best)),
+    source: imageSourceLabel(el),
   }
 }
 
@@ -242,6 +359,11 @@ function selectedText(select: HTMLSelectElement): string {
 function sameItem(a: InventoryItem, b: InventoryItem): boolean {
   return a.role === b.role && a.name === b.name && a.href === b.href
     && a.disabled === b.disabled && a.checked === b.checked && a.inViewport === b.inViewport
+}
+
+function sameImage(a: ImageView, b: ImageView): boolean {
+  return a.name === b.name && a.width === b.width && a.height === b.height
+    && a.pending === b.pending && a.source === b.source
 }
 
 function sameForm(a: FormFieldView, b: FormFieldView): boolean {
@@ -282,12 +404,22 @@ function renderForm(form: FormFieldView, includeIdentity: boolean): string {
   return `  [${form.index}] ${identity}${state}${form.required === true ? ' required' : ''}`
 }
 
+function renderImage(image: ImageView): string {
+  const size = `${image.width}x${image.height}`
+  const state = image.pending ? ' [not loaded yet — a placeholder is on screen]' : ''
+  return `  [${image.index}] image "${image.name}" ${size}${state} — ${image.source}`
+}
+
 function appendTruncationNotes(lines: string[], view: SnapshotView): void {
   const notes: string[] = []
   if (view.truncated.mainChars > 0) notes.push(`Main content truncated by ${view.truncated.mainChars} characters`)
   if (view.truncated.itemsDropped > 0) notes.push(`${view.truncated.itemsDropped} additional elements omitted`)
   if (view.truncated.formsDropped > 0) notes.push(`${view.truncated.formsDropped} additional form fields omitted`)
-  if (notes.length > 0) lines.push(`\n(${notes.join('; ')}. Use browser_get_text or specify region for more content.)`)
+  if (view.truncated.imagesDropped > 0) notes.push(`${view.truncated.imagesDropped} additional images omitted`)
+  if (notes.length > 0) {
+    lines.push(`\n(${notes.join('; ')}. Nothing is lost: browser_get_text({ offset }) pages through the full text, `
+      + `region narrows the read, and browser_snapshot({ full: true }) bypasses the main-content heuristic.)`)
+  }
 }
 
 export function renderSnapshot(view: SnapshotView, delta: boolean, maxChars: number = view.budgetChars): string {
@@ -319,6 +451,12 @@ export function renderSnapshot(view: SnapshotView, delta: boolean, maxChars: num
       const renderedItems = new Set(changedItems.map((item) => item.index))
       for (const form of changedForms) lines.push(renderForm(form, !renderedItems.has(form.index)))
     }
+    const changedImages = view.images.filter((image) => changedIds.has(image.index))
+    if (changedImages.length > 0) {
+      lines.push('')
+      lines.push('Changed images:')
+      for (const image of changedImages) lines.push(renderImage(image))
+    }
     if (view.removed.length > 0) lines.push(`Removed elements: ${view.removed.join(', ')}`)
     if (view.changed.length === 0 && view.removed.length === 0) lines.push('(No visible changes.)')
     appendTruncationNotes(lines, view)
@@ -344,6 +482,11 @@ export function renderSnapshot(view: SnapshotView, delta: boolean, maxChars: num
     for (const form of view.forms) {
       lines.push(renderForm(form, !renderedItems.has(form.index)))
     }
+  }
+  if (view.images.length > 0) {
+    lines.push('')
+    lines.push('Images (read one with browser_read_image({ index }), or several with { indices: [...] }):')
+    for (const image of view.images) lines.push(renderImage(image))
   }
   appendTruncationNotes(lines, view)
   return capRendered(lines.join('\n'), maxChars)

@@ -30,6 +30,7 @@ describe('panel session transitions', () => {
         },
       },
       windows: { getCurrent: vi.fn(async () => ({ id: 1 })) },
+      permissions: { contains: vi.fn(async () => false) },
     })
 
     const rpc = vi.fn(async (method: string, _payload?: unknown) => {
@@ -57,6 +58,8 @@ describe('panel session transitions', () => {
       onTabAffinity: vi.fn(() => unsubscribe),
       onSelection: vi.fn(() => unsubscribe),
       onSessionResumeHint: vi.fn((callback) => { onResumeHint = callback; return unsubscribe }),
+      onPermissionRequest: vi.fn(() => unsubscribe),
+      respondToPermission: vi.fn(async () => {}),
       respondToApproval: vi.fn(async () => {}),
       resolveTabAffinity: vi.fn(async () => {}),
       rebindTabAffinity: vi.fn(async () => {}),
