@@ -121,3 +121,66 @@ export function chromeEvaluateDeps(): EvaluateDeps {
     send: (target, method, params) => chrome.debugger.sendCommand(target, method, params),
   }
 }
+
+/** The one chrome.scripting seam the fallback needs, injected for testability. */
+export interface ScriptingDeps {
+  execute(details: { target: { tabId: number }; world: 'MAIN'; func: (code: string) => Promise<string>; args: [string] }): Promise<unknown[]>
+}
+
+/**
+ * Fallback evaluation via `chrome.scripting.executeScript`.
+ *
+ * Newer Edge builds refuse `debugger` as an optional permission entirely, which
+ * kills the CDP path there. This path needs only the static scripting +
+ * host permissions the manifest already carries: the model-authored code rides
+ * in as an argument and is evaluated in the page's MAIN world by a small
+ * wrapper function.
+ *
+ * Two honest limitations, both surfaced to the caller's error text rather than
+ * hidden: a page whose own CSP forbids `unsafe-eval` rejects this (the CDP path
+ * is immune), and cross-origin restrictions apply as they would for any page
+ * script.
+ *
+ * @param tabId - the tab to evaluate in.
+ * @param expression - the code; its last expression's value is serialized in-page.
+ * @param deps - the chrome.scripting seam.
+ * @returns the serialized result text ('undefined' when there is no value).
+ * @throws EvaluateError when the injection fails or the page blocks eval.
+ */
+export async function evaluateViaScripting(tabId: number, expression: string, deps: ScriptingDeps): Promise<string> {
+  let results: unknown[]
+  try {
+    // The wrapper is async on purpose: executeScript awaits a returned promise,
+    // so `awaitPromise` semantics survive without the CDP flag. Serializing
+    // IN the page keeps values that die on the way out (functions, symbols)
+    // from becoming opaque '{}'.
+    results = await deps.execute({
+      target: { tabId },
+      world: 'MAIN',
+      func: async (code: string) => {
+        // eslint-disable-next-line no-eval -- this is the feature
+        const value = await eval(code)
+        return value === undefined ? 'undefined' : JSON.stringify(value)
+      },
+      args: [expression],
+    })
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new EvaluateError(
+      'evaluate-failed',
+      /eval|csp|Content Security Policy/i.test(message)
+        ? `This page's content-security policy blocks script evaluation (${message}); no fallback can override a page's own CSP.`
+        : `The script could not be injected into this page: ${message}`,
+    )
+  }
+  const first = results[0] as { result?: unknown } | undefined
+  const value = first?.result
+  return typeof value === 'string' ? value : 'undefined'
+}
+
+/** The live chrome.scripting implementation of the fallback seam. */
+export function chromeScriptingDeps(): ScriptingDeps {
+  return {
+    execute: (details) => chrome.scripting.executeScript(details),
+  }
+}

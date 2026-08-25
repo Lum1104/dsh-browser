@@ -237,6 +237,23 @@ export async function runReadPages(request: ReadPagesRequest, deps: ResearchDeps
   ].join('\n\n')
 }
 
+/**
+ * Strip the continuation footer the content script already appended to a
+ * `browser_get_text` window before re-windowing it here.
+ *
+ * The content script returns a correctly-windowed slice plus its own footer
+ * reporting the real total. Re-windowing that decorated response (as raw page
+ * text) would report the slice-plus-footer length as the page total and emit a
+ * continuation based on the wrong count. Removing the footer leaves the raw
+ * slice, which is what this module's own paging contract measures.
+ */
+function stripWindowFooter(text: string): string {
+  // The two footer lines renderWindowFooter emits trail the text:
+  //   \n[showing characters A-B of TOTAL; N remain — continue with CMD]
+  //   \n[end of text: characters A-B of TOTAL]
+  return text.replace(/\n\[(?:showing characters|end of text:).*?\]\s*$/, '')
+}
+
 async function readOne(
   url: string,
   position: number,
@@ -254,7 +271,7 @@ async function readOne(
         ...(request.selector === undefined ? {} : { selector: request.selector }),
       })
       const described = await deps.describeTab(tabId)
-      const body = typeof answer?.text === 'string' ? answer.text : ''
+      const body = stripWindowFooter(typeof answer?.text === 'string' ? answer.text : '')
       if (body === '') return `## ${position}. ${url}\n(could not be read: the page returned no text.)`
       const view = windowText(body, 0, request.maxCharsPerPage)
       const footer = renderWindowFooter(

@@ -715,6 +715,9 @@ export function App(): React.JSX.Element {
   const [tabAffinity, setTabAffinity] = useState<TabAffinityState | null>(null)
   const [trustedOriginInput, setTrustedOriginInput] = useState('')
   const [error, setError] = useState<string | null>(null)
+  // 分支编辑：正在改写哪条用户消息（seq），以及编辑框当前内容。
+  const [editingSeq, setEditingSeq] = useState<number | null>(null)
+  const [editingText, setEditingText] = useState('')
   const [showSessionPicker, setShowSessionPicker] = useState(false)
   const [loadingSessions, setLoadingSessions] = useState(false)
   const [sessionChanging, setSessionChanging] = useState(false)
@@ -1333,6 +1336,68 @@ export function App(): React.JSX.Element {
     } catch (cause) {
       setError(copy.app.deleteSessionFailed(cause instanceof Error ? cause.message : String(cause)))
     }
+  }
+
+  /**
+   * 分支编辑的共用底座：把当前会话 fork 到某条消息之前，切到子会话。
+   *
+   * 网关没有消息级编辑/删除/重roll——`session.fork({ atSeq })` 是唯一的
+   * 截断原语：`atSeq` 锚定其后的第一个 `turn/end` 边界（含该整个回合）。
+   * 因此要"回到 M 之前"，需要传 M 之前最后一个已完成回合（assistant 行）
+   * 的 seq；M 本身是第一个回合时 fork 不可用。原会话原样保留（分支语义），
+   * 子会话承载修改后的走向。
+   */
+  async function forkBeforeAndFollow(seq: number): Promise<boolean> {
+    const current = sessionRef.current
+    if (current === null || busy || working || sendingRef.current || sessionChangingRef.current) return false
+    const prior = rows
+      .filter((candidate) => candidate.kind === 'assistant' && candidate.seq < seq)
+      .at(-1)
+    if (prior === undefined) return false
+    setError(null)
+    const transition = beginSessionTransition()
+    try {
+      const result = await api.rpc<{ sessionId: string }>('session.fork', {
+        sessionId: current,
+        atSeq: prior.seq,
+      })
+      if (sessionTransitionRef.current !== transition) return false
+      const childId = result.sessionId
+      const history = await readHistory(childId)
+      if (sessionTransitionRef.current !== transition) return false
+      const runtime = sessionRuntimeRef.current.snapshot(childId)
+      prepareSessionSwitch(runtime.running, runtime.questions)
+      sessionRef.current = childId
+      await api.setActiveSession(childId)
+      setSessionTitle(childId)
+      setPresetId(null)
+      applyHistory(childId, history)
+      return true
+    } catch (cause) {
+      if (sessionTransitionRef.current === transition) {
+        setError(copy.app.forkFailed(cause instanceof Error ? cause.message : String(cause)))
+      }
+      return false
+    } finally {
+      finishSessionTransition(transition)
+    }
+  }
+
+  /** 重 roll：回到这条回复对应的用户消息之前，原样重发（模型重新作答）。 */
+  async function regenerateFrom(row: Row): Promise<void> {
+    const index = rows.findIndex((candidate) => candidate.seq === row.seq)
+    let userRow: Row | undefined
+    for (let at = Math.max(0, index - 1); at >= 0; at -= 1) {
+      const candidate = rows[at]
+      if (candidate?.kind === 'user') { userRow = candidate; break }
+    }
+    if (userRow === undefined || userRow.text.trim() === '') return
+    if (await forkBeforeAndFollow(userRow.seq)) await send(userRow.text)
+  }
+
+  /** 编辑重发：回到这条用户消息之前，用新文本重新提问。 */
+  async function editAndResend(row: Row, newText: string): Promise<void> {
+    if (await forkBeforeAndFollow(row.seq)) await send(newText)
   }
 
   /** Load the session that owns an approval before exposing its decision UI. */
@@ -2167,7 +2232,60 @@ export function App(): React.JSX.Element {
             {row.kind === 'assistant' && <span className="assistant-avatar"><img src={whaleUrl} alt={copy.app.assistant} /></span>}
             {row.kind === 'tool'
               ? <ToolActivity row={row} copy={copy} />
-              : <MessageBody row={row} sessionId={sessionRef.current ?? ''} api={api} copy={copy} />}
+              : editingSeq === row.seq && row.kind === 'user'
+                ? (
+                  <div className="edit-message">
+                    <textarea
+                      value={editingText}
+                      onChange={(event) => setEditingText(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                          event.preventDefault()
+                          const seq = editingSeq
+                          const text = editingText.trim()
+                          setEditingSeq(null)
+                          if (seq !== null && text !== '') void editAndResend(row, text)
+                        }
+                        if (event.key === 'Escape') setEditingSeq(null)
+                      }}
+                      rows={3}
+                      autoFocus
+                    />
+                    <div className="edit-actions">
+                      <button className="secondary" onClick={() => setEditingSeq(null)}>{copy.app.editCancel}</button>
+                      <button
+                        className="primary"
+                        disabled={editingText.trim() === '' || busy || working}
+                        onClick={() => {
+                          const text = editingText.trim()
+                          setEditingSeq(null)
+                          if (text !== '') void editAndResend(row, text)
+                        }}
+                      >{copy.app.editResend}</button>
+                    </div>
+                  </div>
+                )
+                : <MessageBody row={row} sessionId={sessionRef.current ?? ''} api={api} copy={copy} />}
+            {(row.kind === 'user' || row.kind === 'assistant') && editingSeq !== row.seq && (
+              <span className="row-actions">
+                {row.kind === 'user'
+                  ? (
+                    <button
+                      title={copy.app.editMessage}
+                      aria-label={copy.app.editMessage}
+                      onClick={() => { setEditingSeq(row.seq); setEditingText(row.text) }}
+                    >✎</button>
+                  )
+                  : (
+                    <button
+                      title={copy.app.regenerate}
+                      aria-label={copy.app.regenerate}
+                      disabled={busy || working}
+                      onClick={() => { void regenerateFrom(row) }}
+                    >⟳</button>
+                  )}
+              </span>
+            )}
           </div>
         ))}
         {working && question === null && rows[rows.length - 1]?.status !== 'running' && (

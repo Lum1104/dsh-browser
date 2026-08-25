@@ -480,7 +480,13 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     },
     timeoutMs,
     output: TEXT_OUTPUT,
-    execute: (args, exec) => call(exec, 'browser_act', present(args, ['steps', 'continueOnError', 'frame', 'capture', 'bodies'])),
+    execute: (args, exec) => {
+      const steps = Array.isArray(args.steps) ? (args.steps as unknown[]) : []
+      if (steps.length > options.maxBatchSteps) {
+        throw new Error(`browser_act received ${steps.length} steps, above the configured ${options.maxBatchSteps}-step limit. Split the flow into separate browser_act calls.`)
+      }
+      return call(exec, 'browser_act', present(args, ['steps', 'continueOnError', 'frame', 'capture', 'bodies']))
+    },
   })
 
   const selectOption = defineTool({

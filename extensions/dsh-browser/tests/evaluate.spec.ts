@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   chromeEvaluateDeps,
   evaluateOnTab,
+  evaluateViaScripting,
   EvaluateError,
   MAX_EVALUATE_RESULT_CHARS,
   type EvaluateDeps,
+  type ScriptingDeps,
 } from '../src/background/evaluate.ts'
 
 /** A scripted debugger: records the conversation, answers with queued replies. */
@@ -90,5 +92,44 @@ describe('evaluateOnTab', () => {
     expect(deps.send).toBeTypeOf('function')
     expect(deps.attach).toBeTypeOf('function')
     expect(deps.detach).toBeTypeOf('function')
+  })
+})
+
+describe('evaluateViaScripting (no-debugger fallback)', () => {
+  /** A fake chrome.scripting that captures the injection and replays a result. */
+  function scriptingDeps(reply: unknown[] = [{ result: '{"ok":true}' }]) {
+    return {
+      execute: vi.fn(async (_details: Parameters<ScriptingDeps['execute']>[0]) => reply),
+    }
+  }
+
+  it('injects into the MAIN world with the code riding as an argument', async () => {
+    const deps = scriptingDeps([{ result: '42' }])
+    const value = await evaluateViaScripting(9, 'answer = 42', deps)
+
+    expect(value).toBe('42')
+    const call = deps.execute.mock.calls[0]![0]!
+    expect(call.target).toEqual({ tabId: 9 })
+    expect(call.world).toBe('MAIN')
+    expect(call.args).toEqual(['answer = 42'])
+  })
+
+  it('passes an undefined page result through as "undefined"', async () => {
+    const deps = scriptingDeps([{}])
+    await expect(evaluateViaScripting(1, 'void 0', deps)).resolves.toBe('undefined')
+  })
+
+  it('translates a CSP refusal into an explanation naming the cause', async () => {
+    const deps = scriptingDeps()
+    deps.execute.mockImplementation(async () => {
+      throw new Error("Refused to evaluate a string as JavaScript because 'unsafe-eval' is not an allowed source")
+    })
+    await expect(evaluateViaScripting(1, '1', deps)).rejects.toThrow(/content-security policy/)
+  })
+
+  it('reports plain injection failures without pretending they are CSP', async () => {
+    const deps = scriptingDeps()
+    deps.execute.mockImplementation(async () => { throw new Error('The tab was closed') })
+    await expect(evaluateViaScripting(1, '1', deps)).rejects.toThrow(/could not be injected.*tab was closed/s)
   })
 })

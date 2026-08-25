@@ -84,7 +84,8 @@ import {
   tabsApprovalPrompt,
   verifyApprovalPrompt,
 } from './authorization.ts'
-import { chromeEvaluateDeps, EvaluateError, evaluateOnTab } from './evaluate.ts'
+import { chromeEvaluateDeps, chromeScriptingDeps, EvaluateError, evaluateOnTab, evaluateViaScripting } from './evaluate.ts'
+import { discoverRemoteCdpPort, evaluateViaRemoteCdp, type RemoteCdpDeps } from './cdp-remote.ts'
 import {
   isApprovalDecision,
   type ApprovalAuthorization,
@@ -1332,28 +1333,49 @@ async function dispatchEvaluateCall(call: ToolCall, signal: AbortSignal): Promis
   const refusal = await authorizeOrRefuse(prompt, signal, call.sessionId)
   if (refusal !== undefined) return refusal
 
-  const deps = chromeEvaluateDeps()
+  if (signal.aborted) return cancelledAnswer()
+  // Three paths, best first. chrome.debugger is CSP-immune but needs the
+  // optional debugger permission, which current Edge refuses to even offer;
+  // the remote-debugging port speaks the same protocol with no permission at
+  // all when the browser was started with --remote-debugging-port; the
+  // scripting injection needs nothing extra but runs under the page's own CSP.
   try {
-    // Runtime.evaluate lives behind the same optional permission as trusted
-    // input; request it from an open panel rather than failing opaquely.
-    const granted = await chrome.permissions.contains({ permissions: ['debugger'] })
-      ? true
-      : await requestDebuggerPermission(signal)
-    if (!granted) {
-      return {
-        ok: false,
-        error: {
-          code: 'action-failed',
-          message: 'The user did not grant the browser debugging permission, so page scripts cannot be evaluated. Ask them to enable it in the side panel settings.',
-        },
-      }
+    if (await chrome.permissions.contains({ permissions: ['debugger'] })) {
+      const value = await evaluateOnTab(tabId, expression, chromeEvaluateDeps())
+      return { ok: true, result: { text: `Evaluated on ${target.url ?? 'the page'}:\n${value}` } }
     }
-    if (signal.aborted) return cancelledAnswer()
-    const value = await evaluateOnTab(tabId, expression, deps)
-    return { ok: true, result: { text: `Evaluated on ${target.url ?? 'the page'}:\n${value}` } }
+    try {
+      const port = await discoverRemoteCdpPort(chromeRemoteCdpDeps())
+      const value = await evaluateViaRemoteCdp(tabId, target.url ?? '', expression, port, chromeRemoteCdpDeps())
+      return { ok: true, result: { text: `Evaluated on ${target.url ?? 'the page'} (remote-debugging port ${port}):\n${value}` } }
+    } catch (remoteError) {
+      // A missing endpoint must fall through to the last resort; a genuine
+      // evaluation failure should not be masked by trying a weaker path.
+      const remoteMessage = remoteError instanceof Error ? remoteError.message : String(remoteError)
+      if (!/no remote-debugging endpoint/.test(remoteMessage)) throw remoteError
+    }
+    const value = await evaluateViaScripting(tabId, expression, chromeScriptingDeps())
+    return { ok: true, result: { text: `Evaluated on ${target.url ?? 'the page'} (scripting path):\n${value}` } }
   } catch (error: unknown) {
     if (error instanceof EvaluateError) return { ok: false, error: { code: 'action-failed', message: error.message } }
     return { ok: false, error: { code: 'action-failed', message: error instanceof Error ? error.message : String(error) } }
+  }
+}
+
+/** The live remote-debugging seams bound to real Chrome APIs. */
+function chromeRemoteCdpDeps(): RemoteCdpDeps {
+  return {
+    fetch: (url) => fetch(url),
+    connect: (url) => new WebSocket(url),
+    plantProbe: async (probeTabId, value) => {
+      await chrome.scripting.executeScript({
+        target: { tabId: probeTabId },
+        func: (attribute: string, marker: string) => {
+          document.documentElement.setAttribute(attribute, marker)
+        },
+        args: ['data-dsh-probe', value],
+      })
+    },
   }
 }
 

@@ -158,6 +158,11 @@ export interface PanelCopy {
     deleteSessionConfirm: (title: string) => string
     deleteSessionFailed: (reason: string) => string
     deletePurgeFailed: (reason: string) => string
+    editMessage: string
+    editResend: string
+    editCancel: string
+    regenerate: string
+    forkFailed: (reason: string) => string
     emptyTitle: string
     emptyDescription: string
     overviewPage: string
@@ -421,6 +426,11 @@ const EN: PanelCopy = {
     deleteSessionConfirm: (title) => `Delete “${title}”? Its conversation history will be removed permanently.`,
     deleteSessionFailed: (reason) => `Delete failed: ${reason}`,
     deletePurgeFailed: (reason) => `Removed from the list, but file cleanup failed (it may reappear after dsh restarts): ${reason}`,
+    editMessage: 'Edit and resend from here (branches into a new session)',
+    editResend: 'Save & resend',
+    editCancel: 'Cancel',
+    regenerate: 'Regenerate this reply (branches into a new session)',
+    forkFailed: (reason) => `Branch failed: ${reason}`,
     emptyTitle: 'Hand me the current page',
     emptyDescription: 'I can read the page, find information, and click, fill, or navigate for you.',
     overviewPage: 'Give me an overview',
@@ -683,6 +693,11 @@ const ZH: PanelCopy = {
     deleteSession: '删除会话',
     deleteSessionConfirm: (title) => `确定删除「${title}」吗？对话历史将被永久移除。`,
     deleteSessionFailed: (reason) => `删除失败：${reason}`,
+    editMessage: '从这里编辑并重发（会分支出新会话，原会话保留）',
+    editResend: '保存并重发',
+    editCancel: '取消',
+    regenerate: '重新生成这条回复（会分支出新会话，原会话保留）',
+    forkFailed: (reason) => `分支失败：${reason}`,
     deletePurgeFailed: (reason) => `已从列表移除，但文件清理失败（dsh 重启后可能再次出现）：${reason}`,
     emptyTitle: '把当前页面交给我',
     emptyDescription: '我可以阅读页面、查找信息，也可以替你点击、填写和导航。',
