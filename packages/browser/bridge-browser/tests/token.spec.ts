@@ -34,7 +34,11 @@ describe('token', () => {
     const token = generateToken()
     await writeTokenFile(token, file)
     expect((await readFile(file, 'utf8')).trim()).toBe(token)
-    expect((await stat(file)).mode & 0o777).toBe(0o600)
+    // POSIX 权限位仅在 Unix 上可验证：Windows 的 NTFS 不暴露 mode 位，
+    // Node 的 chmod 只切换 read-only 标志，stat 恒报 0o666。
+    if (process.platform !== 'win32') {
+      expect((await stat(file)).mode & 0o777).toBe(0o600)
+    }
     const resolved = await resolveToken(undefined, file)
     expect(resolved.token).toBe(token)
     expect(resolved.generated).toBe(false)

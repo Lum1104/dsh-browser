@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Tool dispatch: executes `tool.call` frames in an explicitly selected tab via
  * the content script and answers with the text-only result.
  *
@@ -679,6 +679,16 @@ export async function dispatchToolCall(
   }
   if (targetStillAllowed?.() === false) return targetChanged()
   const effectiveBudget = budget ?? { maxItems: 60, maxChars: DEFAULT_SNAPSHOT_MAX_CHARS }
+  // The trust wrapper truncates get_text results to the snapshot budget and
+  // would cut the content script's own window footer off (losing the exact
+  // continuation offset). A request for a larger window is clamped to the
+  // wrapped budget so the footer's total and paging stay intact.
+  if (call.name === 'browser_get_text') {
+    const requested = (call.args as { limit?: unknown }).limit
+    if (typeof requested === 'number' && requested > effectiveBudget.maxChars) {
+      call = { ...call, args: { ...(call.args ?? {}), limit: effectiveBudget.maxChars } }
+    }
+  }
   const capture = CAPTURE_TOOLS.has(call.name) && imageCaps !== undefined
     ? {
         caps: imageCaps,

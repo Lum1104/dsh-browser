@@ -24,6 +24,7 @@ import {
   resolveOffset,
   windowText,
 } from '@yuxianglin/dsh-bridge-browser/src/text-window.ts'
+import { wrapUntrustedContent } from '../security/untrusted.ts'
 
 /** A search the model asked for. */
 export interface SearchRequest {
@@ -279,7 +280,11 @@ async function readOne(
         `browser_read_pages({ urls: ["${url}"], offset: ${request.offset + view.returned} })`,
       )
       const heading = described.title === '' ? url : `${described.title} — ${described.url}`
-      return `## ${position}. ${heading}\n${view.text}${footer}`
+      // Scratch pages are hostile-adjacent: the section rides inside the same
+      // nonce-bound trust boundary as any other page content, so a page's
+      // instruction-shaped text cannot forge the model-facing digest.
+      const section = `## ${position}. ${heading}\n${view.text}${footer}`
+      return wrapUntrustedContent(section, MAX_PAGE_READ_CHARS)
     })
   } catch (error: unknown) {
     return `## ${position}. ${url}\n(could not be read: ${error instanceof Error ? error.message : String(error)})`

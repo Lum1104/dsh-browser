@@ -762,8 +762,9 @@ async function authorizeToolCall(
 ): Promise<ApprovalAuthorization> {
   if (signal.aborted) return 'cancelled'
   // The frictionless path: no dialog, no allowlist lookup, no round trip to a
-  // panel that may not even be open.
-  if (settings.autoApproveActions) return 'approved'
+  // panel that may not even be open. browser_evaluate never rides it: the
+  // model-authored code must stay code-visible, so it always prompts.
+  if (settings.autoApproveActions && prompt.action !== 'browser_evaluate') return 'approved'
   if (actionCoveredByTrustedOrigins(
     prompt,
     sessionTrustedActionOrigins,
@@ -1044,6 +1045,13 @@ const researchDeps: ResearchDeps = {
  */
 async function dispatchProactiveCall(call: ToolCall, signal: AbortSignal): Promise<ToolAnswer> {
   if (signal.aborted) return cancelledAnswer()
+  // Privacy boundary: with sharing off, research pages must not reach the
+  // model either — the proactive handlers would otherwise bypass the
+  // PAGE_CONTENT_TOOLS guard that normal dispatch uses.
+  if (settings.sharePageContent === 'off'
+    && (call.name === 'browser_search' || call.name === 'browser_read_pages')) {
+    return { ok: false, error: { code: 'action-failed', message: 'Page content sharing is disabled in Settings > Page content sharing.' } }
+  }
   try {
     switch (call.name) {
       case 'browser_search': {
