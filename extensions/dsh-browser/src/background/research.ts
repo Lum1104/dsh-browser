@@ -199,7 +199,10 @@ export async function runSearch(request: SearchRequest, deps: ResearchDeps): Pro
   if (typeof text !== 'string' || text === '') {
     throw new ResearchError('action-failed', `The ${request.engine} results page could not be read. It may have shown a consent or verification interstitial.`)
   }
-  return `${text}\n\nRead the promising ones with browser_read_pages (several URLs in one call).`
+  // Anchor text and snippets come straight from the scratch search page, so they
+  // ride inside the nonce-bound boundary; the follow-up guidance stays outside.
+  const harvested = wrapUntrustedContent(text, MAX_PAGE_READ_CHARS)
+  return `${harvested}\n\nRead the promising ones with browser_read_pages (several URLs in one call).`
 }
 
 /**

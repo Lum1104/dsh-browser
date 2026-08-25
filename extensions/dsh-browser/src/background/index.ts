@@ -1439,17 +1439,29 @@ function routeToolCall(call: ToolCall): void {
   const budget = caps === null
     ? undefined
     : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars }
-  const work = call.name === 'browser_tabs'
-    ? dispatchTabsCall(call, controller.signal)
-    : PROACTIVE_TOOLS.has(call.name)
-      ? dispatchProactiveCall(call, controller.signal)
-      : call.name === 'browser_verify'
-        ? dispatchVerifyCall(call, controller.signal)
-        : call.name === 'browser_inspect'
-          ? dispatchInspectCall(call, controller.signal)
-          : call.name === 'browser_evaluate'
-            ? dispatchEvaluateCall(call, controller.signal)
-            : dispatchPageCall(call, controller.signal, budget)
+  // evaluate/inspect dispatch their own handlers and skip dispatchToolCall,
+  // which carries the only PAGE_CONTENT_TOOLS enforcement — so the sharing-off
+  // boundary must gate them here as well.
+  let work: Promise<ToolAnswer>
+  if (settings.sharePageContent === 'off'
+    && (call.name === 'browser_evaluate' || call.name === 'browser_inspect')) {
+    work = Promise.resolve({
+      ok: false,
+      error: { code: 'action-failed', message: 'Page content sharing is disabled in Settings > Page content sharing.' },
+    } as ToolAnswer)
+  } else {
+    work = call.name === 'browser_tabs'
+      ? dispatchTabsCall(call, controller.signal)
+      : PROACTIVE_TOOLS.has(call.name)
+        ? dispatchProactiveCall(call, controller.signal)
+        : call.name === 'browser_verify'
+          ? dispatchVerifyCall(call, controller.signal)
+          : call.name === 'browser_inspect'
+            ? dispatchInspectCall(call, controller.signal)
+            : call.name === 'browser_evaluate'
+              ? dispatchEvaluateCall(call, controller.signal)
+              : dispatchPageCall(call, controller.signal, budget)
+  }
   void work.then(
     (answer) => {
       if (controller.signal.aborted) {

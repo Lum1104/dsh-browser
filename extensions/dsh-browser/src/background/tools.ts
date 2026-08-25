@@ -111,6 +111,10 @@ const PAGE_CONTENT_TOOLS = new Set([
 const pendingInjections = new Map<number, Promise<void>>()
 const snapshotDocumentsByTab = new Map<number, Map<number, string>>()
 
+/** Room the secure wrapper + a content-script continuation footer need before
+ * a get_text window may fill the whole snapshot budget. */
+const TEXT_WINDOW_WRAP_RESERVE = 1024
+
 /** Forget delta/element state whenever the user explicitly follows a new tab. */
 export function resetTabSnapshot(tabId: number): void {
   snapshotDocumentsByTab.delete(tabId)
@@ -635,6 +639,11 @@ async function dispatchOnce(
   if (call.name === 'browser_get_text') {
     return { ok: true, result: { text: wrapUntrustedContent(text, budget.maxChars) } }
   }
+  if (call.name === 'browser_find') {
+    // Find results carry page-controlled accessible names, context and URLs —
+    // the same untrusted-data boundary as snapshots and get_text.
+    return { ok: true, result: { text: wrapUntrustedContent(text, budget.maxChars) } }
+  }
   const pageContent = requestPageDelta ? answerPageContent(response) : undefined
   return {
     ok: true,
@@ -681,12 +690,14 @@ export async function dispatchToolCall(
   const effectiveBudget = budget ?? { maxItems: 60, maxChars: DEFAULT_SNAPSHOT_MAX_CHARS }
   // The trust wrapper truncates get_text results to the snapshot budget and
   // would cut the content script's own window footer off (losing the exact
-  // continuation offset). A request for a larger window is clamped to the
-  // wrapped budget so the footer's total and paging stay intact.
+  // continuation offset). A request for a larger window is clamped with room
+  // reserved for the wrapper's nonce/notice overhead and the footer itself, so
+  // the footer's total and paging stay intact.
   if (call.name === 'browser_get_text') {
     const requested = (call.args as { limit?: unknown }).limit
-    if (typeof requested === 'number' && requested > effectiveBudget.maxChars) {
-      call = { ...call, args: { ...(call.args ?? {}), limit: effectiveBudget.maxChars } }
+    const wrapped = Math.max(0, effectiveBudget.maxChars - TEXT_WINDOW_WRAP_RESERVE)
+    if (typeof requested === 'number' && requested > wrapped) {
+      call = { ...call, args: { ...(call.args ?? {}), limit: wrapped } }
     }
   }
   const capture = CAPTURE_TOOLS.has(call.name) && imageCaps !== undefined

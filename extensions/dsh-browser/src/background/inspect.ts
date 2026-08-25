@@ -20,6 +20,11 @@
  */
 
 import { renderWindowFooter, windowText } from '@yuxianglin/dsh-bridge-browser/src/text-window.ts'
+import { wrapUntrustedContent } from '../security/untrusted.ts'
+
+/** Ceiling for a wrapped inspection report: context is page-controlled, so the
+ * boundary is what matters and a report beyond this is truncated with a note. */
+export const INSPECTION_REPORT_MAX_CHARS = 200_000
 
 /** One console message or uncaught exception. */
 export interface ConsoleEntry {
@@ -461,7 +466,9 @@ export function renderInspection(report: InspectionReport, heading: string): str
   if (report.bodies.length === 0 && report.requests.some(isTextResponse)) {
     lines.push('(Pass bodies: true to read the JSON or text responses above instead of scraping the page.)')
   }
-  return lines.join('\n')
+  // Console text, URLs and response bodies are page-controlled, so the report
+  // rides inside the nonce-bound trust boundary like any other page read.
+  return wrapUntrustedContent(lines.join('\n'), INSPECTION_REPORT_MAX_CHARS)
 }
 
 /** The live Chrome implementation of the seams above. */
