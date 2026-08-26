@@ -17,6 +17,8 @@ const FULL = 'https://img.example/full.jpg'
 const THUMB = 'https://img.example/thumb.jpg'
 const BOX = { x: 10, y: 20, width: 100, height: 50, dpr: 1 }
 const BITMAP = { width: 1600, height: 1200 } as ImageBitmap
+/** The tab the call is bound to, as the background affinity controller resolved it. */
+const CONTROLLED_TAB = 7
 
 function urlSource(overrides: Record<string, unknown> = {}) {
   return {
@@ -32,7 +34,9 @@ function urlSource(overrides: Record<string, unknown> = {}) {
 }
 
 function chromeMock() {
-  return chrome as unknown as { tabs: { captureVisibleTab: ReturnType<typeof vi.fn> } }
+  return chrome as unknown as {
+    tabs: { captureVisibleTab: ReturnType<typeof vi.fn>; query: ReturnType<typeof vi.fn> }
+  }
 }
 
 beforeEach(() => {
@@ -47,7 +51,10 @@ beforeEach(() => {
   }))
   vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width: 800, height: 600 })))
   vi.stubGlobal('chrome', {
-    tabs: { captureVisibleTab: vi.fn(async () => 'data:image/png;base64,AAAA') },
+    tabs: {
+      captureVisibleTab: vi.fn(async () => 'data:image/png;base64,AAAA'),
+      query: vi.fn(async () => [{ id: CONTROLLED_TAB }]),
+    },
   })
 })
 
@@ -135,5 +142,62 @@ describe('captureAnswer URL sources', () => {
     expect(chromeMock().tabs.captureVisibleTab).not.toHaveBeenCalled()
     expect((answer.result as { images?: unknown[] }).images).toBeUndefined()
     expect((answer.result as { text: string }).text).toContain('status 404')
+  })
+})
+
+describe('captureAnswer viewport identity', () => {
+  beforeEach(() => {
+    // Every case here falls through to the viewport crop, which is the only
+    // path that photographs the window rather than a resolved image source.
+    vi.mocked(fetchImageBitmap).mockRejectedValue(new CaptureError('the image request failed with status 404'))
+  })
+
+  it('refuses to photograph the window once the controlled tab stopped being visible', async () => {
+    chromeMock().tabs.query.mockResolvedValue([{ id: CONTROLLED_TAB + 1 }])
+
+    const answer = await captureAnswer(
+      { windowId: 1, active: true },
+      'Reading 1 image.',
+      [urlSource()],
+      FALLBACK_IMAGE_CAPS,
+      CONTROLLED_TAB,
+    )
+
+    // `active: true` was true when the target was resolved; the user switching
+    // tabs afterwards is exactly what the stale flag cannot express.
+    expect(chromeMock().tabs.captureVisibleTab).not.toHaveBeenCalled()
+    expect((answer.result as { images?: unknown[] }).images).toBeUndefined()
+    expect((answer.result as { text: string }).text).toContain('no longer the visible tab')
+  })
+
+  it('captures while the controlled tab is still the visible one', async () => {
+    chromeMock().tabs.query.mockResolvedValue([{ id: CONTROLLED_TAB }])
+
+    const answer = await captureAnswer(
+      { windowId: 1, active: true },
+      'Reading 1 image.',
+      [urlSource()],
+      FALLBACK_IMAGE_CAPS,
+      CONTROLLED_TAB,
+    )
+
+    expect(chromeMock().tabs.query).toHaveBeenCalledWith({ active: true, windowId: 1 })
+    expect(chromeMock().tabs.captureVisibleTab).toHaveBeenCalled()
+    expect((answer.result as { images?: unknown[] }).images).toHaveLength(1)
+  })
+
+  it('reports a window whose visible tab cannot be identified instead of guessing', async () => {
+    chromeMock().tabs.query.mockRejectedValue(new Error('no such window'))
+
+    const answer = await captureAnswer(
+      { windowId: 1, active: true },
+      'Reading 1 image.',
+      [urlSource()],
+      FALLBACK_IMAGE_CAPS,
+      CONTROLLED_TAB,
+    )
+
+    expect(chromeMock().tabs.captureVisibleTab).not.toHaveBeenCalled()
+    expect((answer.result as { text: string }).text).toContain('could not be identified')
   })
 })

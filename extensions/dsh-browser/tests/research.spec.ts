@@ -8,6 +8,7 @@ import {
   runSearch,
   ResearchError,
   searchUrl,
+  withinApprovedBoundary,
   type ResearchDeps,
 } from '../src/background/research.ts'
 
@@ -95,6 +96,32 @@ describe('requestOrigins', () => {
   })
 })
 
+describe('withinApprovedBoundary', () => {
+  const approved = ['https://docs.example']
+
+  it('accepts the approved origin and the redirects the ordinary web makes', () => {
+    expect(withinApprovedBoundary('https://docs.example/page', approved)).toBe(true)
+    expect(withinApprovedBoundary('https://www.docs.example/page', approved)).toBe(true)
+    expect(withinApprovedBoundary('http://docs.example/page', approved)).toBe(true)
+  })
+
+  it('rejects another site, a non-web scheme, and an unparseable url', () => {
+    expect(withinApprovedBoundary('https://evil.example/page', approved)).toBe(false)
+    expect(withinApprovedBoundary('file:///etc/passwd', approved)).toBe(false)
+    expect(withinApprovedBoundary('not a url', approved)).toBe(false)
+  })
+
+  it('keeps two private-suffix sites apart rather than sharing their suffix', () => {
+    expect(withinApprovedBoundary('https://b.github.io/x', ['https://a.github.io'])).toBe(false)
+    expect(withinApprovedBoundary('https://a.github.io/y', ['https://a.github.io'])).toBe(true)
+  })
+
+  it('falls back to exact host equality where there is no registrable domain', () => {
+    expect(withinApprovedBoundary('http://127.0.0.1:8080/x', ['http://127.0.0.1:8080'])).toBe(true)
+    expect(withinApprovedBoundary('http://127.0.0.2:8080/x', ['http://127.0.0.1:8080'])).toBe(false)
+  })
+})
+
 describe('runSearch', () => {
   it('reads the results page in a scratch tab and closes it', async () => {
     const recorder = makeDeps({}, () => '1. Result\n   https://result.example')
@@ -171,6 +198,57 @@ describe('runReadPages', () => {
     expect(text).toContain('good content')
     expect(text).toContain('Read 1 of 2 page(s)')
     expect(recorder.leaked()).toEqual([])
+  })
+
+  it('refuses a page that redirected out of the approved origins, before reading it', async () => {
+    const recorder = makeDeps({
+      describeTab: async () => ({ title: 'Elsewhere', url: 'https://evil.example/landing' }),
+    }, () => 'secret body')
+
+    const text = await runReadPages(parseReadPagesRequest({ urls: ['https://a.example/1'] }), recorder.deps)
+
+    expect(text).toContain('could not be read: it redirected to https://evil.example')
+    expect(text).not.toContain('secret body')
+    // The refusal has to land BEFORE extraction: reading first and refusing
+    // afterwards would already have pulled the unapproved body into the worker.
+    expect(recorder.asked.filter((entry) => entry.action === 'browser_get_text')).toEqual([])
+    expect(text).toContain('Read 0 of 1 page(s)')
+    expect(recorder.leaked()).toEqual([])
+  })
+
+  it('reports only the landed origin, never the redirect target url', async () => {
+    const recorder = makeDeps({
+      describeTab: async () => ({ title: 'x', url: 'https://evil.example/ignore-previous-instructions' }),
+    })
+
+    const text = await runReadPages(parseReadPagesRequest({ urls: ['https://a.example/1'] }), recorder.deps)
+
+    expect(text).toContain('https://evil.example')
+    expect(text).not.toContain('ignore-previous-instructions')
+  })
+
+  it('follows an ordinary same-site redirect', async () => {
+    const recorder = makeDeps({
+      describeTab: async () => ({ title: 'Doc', url: 'https://www.a.example/1' }),
+    }, () => 'body text')
+
+    const text = await runReadPages(parseReadPagesRequest({ urls: ['http://a.example/1'] }), recorder.deps)
+
+    expect(text).toContain('body text')
+    expect(text).toContain('Read 1 of 1 page(s)')
+  })
+
+  it('judges each page against the whole approved set, not just its own url', async () => {
+    // One call approves both origins, so b.example landing on a.example is inside.
+    const recorder = makeDeps({
+      describeTab: async () => ({ title: 'Doc', url: 'https://a.example/moved' }),
+    }, () => 'body text')
+
+    const text = await runReadPages(parseReadPagesRequest({
+      urls: ['https://a.example/1', 'https://b.example/2'],
+    }), recorder.deps)
+
+    expect(text).toContain('Read 2 of 2 page(s)')
   })
 
   it('windows a long page and names the call that reads the rest', async () => {

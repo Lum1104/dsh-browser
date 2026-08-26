@@ -386,7 +386,7 @@ async function captureFromBox(
       // protocol refusal all mean the same thing here.
     }
   }
-  const viewport = await captureViewport(target)
+  const viewport = await captureViewport(target, tabId)
   const crop = clampBoxToImage(box, viewport.width, viewport.height)
   if (crop === undefined) {
     throw new CaptureError('the element is scrolled outside the visible viewport; scroll to it and capture again')
@@ -422,16 +422,46 @@ async function captureImage(
     }
     return encodeBitmap(bitmap, caps, undefined, source.name)
   }
-  if (source === undefined) return encodeBitmap(await captureViewport(target), caps)
+  if (source === undefined) return encodeBitmap(await captureViewport(target, tabId), caps)
   return captureFromBox(target, source.box, source.name, caps, tabId)
 }
 
-/** Capture the visible tab of the controlled window and decode it. */
-async function captureViewport(target: CaptureTarget): Promise<ImageBitmap> {
+/**
+ * Capture the visible tab of the controlled window and decode it.
+ *
+ * @param target - window and visibility facts resolved when the call started.
+ * @param tabId - the controlled tab; production dispatch always supplies it, so
+ *   the identity recheck below is skipped only by a direct caller that named no
+ *   tab to begin with.
+ */
+async function captureViewport(target: CaptureTarget, tabId?: number): Promise<ImageBitmap> {
   if (target.active === false) {
     throw new CaptureError(
       'the controlled page is a background tab, and only a visible tab can be captured; bring it forward with browser_tabs (action "switch", activate true) or ask the user to focus it',
     )
+  }
+  // `captureVisibleTab` photographs whatever is visible in the window AT THIS
+  // MOMENT, not the tab this call was bound to, and `target.active` only says
+  // what was true when the target was resolved. The user can switch tabs while
+  // the call is in flight, so identity is re-established here — otherwise an
+  // unrelated page's pixels come back as the requested screenshot.
+  if (tabId !== undefined) {
+    let visible: chrome.tabs.Tab | undefined
+    try {
+      const [found] = await chrome.tabs.query(
+        target.windowId === undefined
+          ? { active: true, lastFocusedWindow: true }
+          : { active: true, windowId: target.windowId },
+      )
+      visible = found
+    } catch (error: unknown) {
+      throw new CaptureError(`the visible tab could not be identified: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    if (visible?.id !== tabId) {
+      throw new CaptureError(
+        'the controlled page is no longer the visible tab in its window, so capturing now would photograph a different page; bring it forward with browser_tabs (action "switch", activate true) and capture again',
+      )
+    }
   }
   let dataUrl: string
   try {
