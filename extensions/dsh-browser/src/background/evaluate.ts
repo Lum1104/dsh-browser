@@ -15,6 +15,8 @@
  * @module
  */
 
+import { wrapDerivedReport } from '../security/untrusted.ts'
+
 /** Chrome seams, injected so the protocol conversation is testable. */
 export interface EvaluateDeps {
   attach(target: chrome.debugger.Debuggee, version: string): Promise<void>
@@ -183,4 +185,24 @@ export function chromeScriptingDeps(): ScriptingDeps {
   return {
     execute: (details) => chrome.scripting.executeScript(details),
   }
+}
+
+/**
+ * Compose the model-facing answer for one evaluation.
+ *
+ * The value is whatever the model's expression returned from the page's MAIN
+ * world, which makes it the most page-controlled text any tool hands back — a
+ * page can choose both the data and any prose inside it. It therefore rides in
+ * the nonce-bound boundary, exactly as an inspection report does, while the
+ * extension's own "where this ran" line stays outside so the model can still
+ * trust that part.
+ *
+ * @param url - the evaluated page's URL, when known.
+ * @param value - the serialized result from one of the evaluation paths.
+ * @param via - which fallback path produced it, when not the default.
+ * @returns model-facing text.
+ */
+export function renderEvaluation(url: string | undefined, value: string, via?: string): string {
+  const where = `Evaluated on ${url === undefined || url === '' ? 'the page' : url}${via === undefined ? '' : ` (${via})`}:`
+  return `${where}\n${wrapDerivedReport(value, MAX_EVALUATE_RESULT_CHARS)}`
 }

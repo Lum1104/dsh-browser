@@ -14,6 +14,7 @@
  */
 
 import type { AffinityTab } from './tab-affinity.ts'
+import { wrapDerivedReport } from '../security/untrusted.ts'
 
 /** The parsed `browser_tabs` request. */
 export interface TabsRequest {
@@ -101,12 +102,21 @@ function affinityTab(tab: chrome.tabs.Tab): AffinityTab | null {
 
 /**
  * Execute one tab request.
+ *
+ * Every answer names pages by their own title and URL, which the pages control,
+ * so the report is enclosed in the untrusted-content boundary exactly as a
+ * snapshot or an inspection report is.
+ *
  * @param request - the parsed request.
  * @param deps - Chrome and affinity seams.
- * @returns model-facing text.
+ * @returns model-facing text, inside the trust boundary.
  * @throws TabsError when the request cannot be carried out.
  */
 export async function runTabsAction(request: TabsRequest, deps: TabsDeps): Promise<string> {
+  return wrapDerivedReport(await renderTabsAction(request, deps))
+}
+
+async function renderTabsAction(request: TabsRequest, deps: TabsDeps): Promise<string> {
   switch (request.action) {
     case 'list':
       return renderTabList(await summarizeTabs(deps))

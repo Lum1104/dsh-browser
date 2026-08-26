@@ -645,30 +645,54 @@ function backgroundImageUrl(el: Element): string | undefined {
   }
 }
 
+/** An image element and the locator that actually resolved it. */
+export interface LocatedImage {
+  element: Element
+  /** Which of the query's locators found it, so a stale index can be reported. */
+  via: 'index' | 'selector' | 'alt'
+}
+
 /**
  * Resolve the image element the model asked for.
+ *
+ * The locators are tried in the order they are trustworthy — index, then
+ * selector, then alt text — and a locator that fails falls through to the next
+ * rather than failing the read. That is the contract `renderFindResult`
+ * advertises ("the selector is used automatically if the page re-rendered") and
+ * the one page actions already honour, so an index invalidated by a re-render
+ * costs nothing when the model passed both.
+ *
+ * `isConnected` is checked rather than registry membership alone, for the same
+ * reason page actions check it: the registry holds a strong reference, so after
+ * a re-render an index still resolves — to a DETACHED node, whose old `src`
+ * would be returned as a picture of the current page.
+ *
  * @param ids - the stable id registry.
  * @param query - index, selector, or alt-text match.
- * @returns the element, or `undefined` when nothing matched.
+ * @returns the element and how it was found, or `undefined` when nothing matched.
  */
 export function locateImageElement(
   ids: ElementIds,
   query: { index?: number; selector?: string; alt?: string },
-): Element | undefined {
-  if (query.index !== undefined) return ids.elementByIndex(query.index)
+): LocatedImage | undefined {
+  if (query.index !== undefined) {
+    const byIndex = ids.elementByIndex(query.index)
+    if (byIndex !== undefined && byIndex.isConnected) return { element: byIndex, via: 'index' }
+  }
   if (query.selector !== undefined && query.selector !== '') {
+    let found: Element | null
     try {
-      const found = document.querySelector(query.selector)
-      if (found !== null) return found
+      found = document.querySelector(query.selector)
     } catch {
       throw new FindError(`selector is not a valid CSS selector: ${query.selector}`)
     }
-    return undefined
+    if (found !== null) return { element: found, via: 'selector' }
   }
   if (query.alt !== undefined && query.alt !== '') {
     const wanted = normalize(query.alt)
     const candidates = [...document.querySelectorAll('img, canvas, svg, video, picture, [style*="background-image"]')]
-    return candidates.find((el) => isVisible(el) && searchableText(el).includes(wanted))
+    const found = candidates.find((el) => isVisible(el) && searchableText(el).includes(wanted))
+    if (found !== undefined) return { element: found, via: 'alt' }
   }
   return undefined
 }

@@ -25,6 +25,7 @@ import {
   renderFindResult,
   roleOf,
   type ImageSource,
+  type LocatedImage,
 } from './locate.ts'
 import { DEFAULT_EXPAND_OPTIONS, expandPage, renderExpandResult } from './expand.ts'
 import { harvestLinks, renderLinks } from './harvest.ts'
@@ -927,18 +928,24 @@ function readImageAction(args: Record<string, unknown>, ctx: ActionContext): Act
   const sources: ImageSource[] = []
   const lines: string[] = []
   for (const query of queries) {
-    let el: Element | undefined
+    let located: LocatedImage | undefined
     try {
-      el = locateImageElement(ctx.ids, query)
+      located = locateImageElement(ctx.ids, query)
     } catch (error: unknown) {
       if (error instanceof FindError) throw new ActionError('bad-args', error.message)
       throw error
     }
-    const label = query.index !== undefined ? `[${query.index}]` : query.selector ?? query.alt ?? 'the image'
-    if (el === undefined) {
-      lines.push(`${label}: no image matched.`)
+    const requested = query.index !== undefined ? `[${query.index}]` : query.selector ?? query.alt ?? 'the image'
+    if (located === undefined) {
+      lines.push(`${requested}: no image matched.`)
       continue
     }
+    const el = located.element
+    // Naming the index that no longer resolves would invite the model to act on
+    // it; say which locator stood in instead.
+    const label = query.index === undefined || located.via === 'index'
+      ? requested
+      : `${requested} (stale index; found by ${located.via})`
     el.scrollIntoView({ block: 'center', behavior: 'instant' })
     const source = imageSourceFor(el)
     if (source === undefined) {

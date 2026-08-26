@@ -138,16 +138,42 @@ describe('imageSourceFor', () => {
 })
 
 describe('locateImageElement', () => {
-  it('resolves by index, selector, and alt text', () => {
+  it('resolves by index, selector, and alt text, reporting which one hit', () => {
     setBody('<img id="one" src="/one.png" alt="First chart"><img id="two" src="/two.png" alt="Second chart">')
     const ids = new ElementIds()
     const first = document.querySelector('#one')!
     ids.assign([first])
 
-    expect(locateImageElement(ids, { index: ids.indexOf(first)! })).toBe(first)
-    expect(locateImageElement(ids, { selector: '#two' })?.id).toBe('two')
-    expect(locateImageElement(ids, { alt: 'second' })?.id).toBe('two')
+    expect(locateImageElement(ids, { index: ids.indexOf(first)! }))
+      .toEqual({ element: first, via: 'index' })
+    expect(locateImageElement(ids, { selector: '#two' })?.element.id).toBe('two')
+    expect(locateImageElement(ids, { selector: '#two' })?.via).toBe('selector')
+    expect(locateImageElement(ids, { alt: 'second' })?.element.id).toBe('two')
+    expect(locateImageElement(ids, { alt: 'second' })?.via).toBe('alt')
     expect(locateImageElement(ids, { alt: 'nothing here' })).toBeUndefined()
+  })
+
+  it('refuses a detached node behind a stale index and falls through to the selector', () => {
+    setBody('<img id="one" src="/one.png" alt="First chart">')
+    const ids = new ElementIds()
+    ids.assign([document.querySelector('#one')!])
+    const staleIndex = ids.indexOf(document.querySelector('#one')!)!
+    // What a re-render does: the registered node leaves the document, but the
+    // registry still holds a strong reference to it.
+    setBody('<img id="one" src="/two.png" alt="First chart">')
+
+    expect(ids.elementByIndex(staleIndex)?.isConnected).toBe(false)
+    // Without the isConnected check this returned the OLD node, and its /one.png
+    // would have been read back as a picture of the current page.
+    expect(locateImageElement(ids, { index: staleIndex })).toBeUndefined()
+    expect(locateImageElement(ids, { index: staleIndex, selector: '#one' }))
+      .toEqual({ element: document.querySelector('#one'), via: 'selector' })
+  })
+
+  it('falls through a selector that matches nothing to the alt text', () => {
+    setBody('<img id="one" src="/one.png" alt="First chart">')
+
+    expect(locateImageElement(new ElementIds(), { selector: '#gone', alt: 'first' })?.via).toBe('alt')
   })
 
   it('rejects an invalid selector', () => {

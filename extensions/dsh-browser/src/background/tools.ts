@@ -481,6 +481,17 @@ async function captureViewport(target: CaptureTarget, tabId?: number): Promise<I
   }
 }
 
+/**
+ * Enclose an answer's text in the untrusted-content boundary, leaving any image
+ * payloads untouched.
+ */
+function wrapAnswerText(answer: ToolAnswer, maxChars: number): ToolAnswer {
+  if (!answer.ok || typeof answer.result !== 'object' || answer.result === null) return answer
+  const result = answer.result as { text?: unknown }
+  if (typeof result.text !== 'string') return answer
+  return { ...answer, result: { ...result, text: wrapUntrustedContent(result.text, maxChars) } }
+}
+
 /** Keep extension-authored action status outside the nonce-bound page-data boundary. */
 function wrapActionDelta(status: string, pageContent: string, frame: TabFrame, maxChars: number): string {
   const prefix = `${status}\n${ACTION_DELTA_GUIDANCE}`
@@ -644,11 +655,19 @@ async function dispatchOnce(
   if (CAPTURE_TOOLS.has(call.name)) {
     navigationWait?.cancel()
     if (capture === undefined) {
-      return { ok: true, result: { text: `${text}\nThe image could not be produced: this dsh deployment does not accept image results.` } }
+      return wrapAnswerText(
+        { ok: true, result: { text: `${text}\nThe image could not be produced: this dsh deployment does not accept image results.` } },
+        budget.maxChars,
+      )
     }
     if (isCancelled(call, signal)) return cancelled()
     if (targetStillAllowed?.() === false) return targetChanged()
-    return captureAnswer(capture.target, text, answerImageSources(response), capture.caps, tabId)
+    const captured = await captureAnswer(capture.target, text, answerImageSources(response), capture.caps, tabId)
+    // The status text names each image by its page-authored alt text, and the
+    // per-image notes repeat those names, so it rides inside the same boundary
+    // as any other page-derived report. The images themselves are not text and
+    // are left untouched.
+    return wrapAnswerText(captured, budget.maxChars)
   }
   if (answerNavigationPending(response) && navigationWait !== undefined) {
     const ready = await navigationWait.ready

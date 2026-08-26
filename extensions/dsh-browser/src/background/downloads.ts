@@ -15,6 +15,7 @@
  */
 
 import { MAX_BATCH_DOWNLOADS } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { wrapDerivedReport } from '../security/untrusted.ts'
 
 /** One download the model asked for. */
 export interface DownloadRequest {
@@ -171,11 +172,19 @@ export function basenameFromUrl(url: string): string {
 
 /**
  * Start one or more downloads.
+ *
+ * Filenames are influenced by the remote server (`Content-Disposition`) and the
+ * report echoes them, so it is enclosed in the untrusted-content boundary.
+ *
  * @param request - the validated request.
  * @param deps - Chrome seams.
- * @returns model-facing text listing each started id.
+ * @returns model-facing text listing each started id, inside the trust boundary.
  */
 export async function runDownload(request: DownloadRequest, deps: DownloadsDeps): Promise<string> {
+  return wrapDerivedReport(await startDownloads(request, deps))
+}
+
+async function startDownloads(request: DownloadRequest, deps: DownloadsDeps): Promise<string> {
   const lines: string[] = []
   const started: number[] = []
   for (const [position, url] of request.urls.entries()) {
@@ -228,11 +237,19 @@ function renderItem(item: chrome.downloads.DownloadItem): string {
 
 /**
  * Run one management operation.
+ *
+ * A listing carries each item's stored filename, which the remote server
+ * influenced, so the report is enclosed like any other derived text.
+ *
  * @param request - the validated request.
  * @param deps - Chrome seams.
- * @returns model-facing text.
+ * @returns model-facing text, inside the trust boundary.
  */
 export async function runDownloadsAction(request: DownloadsRequest, deps: DownloadsDeps): Promise<string> {
+  return wrapDerivedReport(await manageDownloads(request, deps))
+}
+
+async function manageDownloads(request: DownloadsRequest, deps: DownloadsDeps): Promise<string> {
   if (request.action === 'list') {
     const items = await deps.search({ limit: request.limit, orderBy: ['-startTime'] })
     if (items.length === 0) return 'No downloads have been started in this browser profile.'

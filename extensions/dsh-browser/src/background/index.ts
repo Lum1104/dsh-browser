@@ -84,7 +84,7 @@ import {
   tabsApprovalPrompt,
   verifyApprovalPrompt,
 } from './authorization.ts'
-import { chromeEvaluateDeps, chromeScriptingDeps, EvaluateError, evaluateOnTab, evaluateViaScripting } from './evaluate.ts'
+import { chromeEvaluateDeps, chromeScriptingDeps, EvaluateError, evaluateOnTab, evaluateViaScripting, renderEvaluation } from './evaluate.ts'
 import { discoverRemoteCdpPort, evaluateViaRemoteCdp, type RemoteCdpDeps } from './cdp-remote.ts'
 import {
   isApprovalDecision,
@@ -92,6 +92,7 @@ import {
   type ApprovalPrompt,
   type ApprovalRequest,
 } from '../security/approval.ts'
+import { wrapDerivedReport } from '../security/untrusted.ts'
 import { getUiLocale } from '../i18n.ts'
 import { InteractionResponseRouter } from './responses.ts'
 import {
@@ -1133,7 +1134,9 @@ async function dispatchVerifyCall(call: ToolCall, signal: AbortSignal): Promise<
     return { ok: false, error: { code: 'content-unavailable', message: `The page could not be inspected for a verification widget: ${error instanceof Error ? error.message : String(error)}` } }
   }
   const point = firstVerificationPoint(located.targets)
-  if (point === undefined) return { ok: true, result: { text: located.text } }
+  // The located report names widgets by their page-authored frame titles and
+  // URLs, so it is enclosed; the click outcome below is the extension's own.
+  if (point === undefined) return { ok: true, result: { text: wrapDerivedReport(located.text) } }
   if (!tabAffinity.allowsTarget(tabId)) {
     return { ok: false, error: { code: 'content-unavailable', message: 'The controlled tab changed before the verification click.' } }
   }
@@ -1163,7 +1166,7 @@ async function dispatchVerifyCall(call: ToolCall, signal: AbortSignal): Promise<
   return {
     ok: true,
     result: {
-      text: `${located.text}\nDelivered a trusted click to the widget. Verification resolves asynchronously — call browser_snapshot (or browser_wait for the page's own content) to see whether it passed.`,
+      text: `${wrapDerivedReport(located.text)}\nDelivered a trusted click to the widget. Verification resolves asynchronously — call browser_snapshot (or browser_wait for the page's own content) to see whether it passed.`,
     },
   }
 }
@@ -1200,6 +1203,26 @@ const PROACTIVE_TOOLS = new Set(['browser_search', 'browser_read_pages', 'browse
 /** Default and maximum recording window for a standalone inspection, in ms. */
 const DEFAULT_INSPECT_MS = 2_500
 const MAX_INSPECT_MS = 20_000
+
+/**
+ * Sleep for a recording window, returning early when the call is cancelled.
+ *
+ * A plain timer would hold the debugger — and the banner Chrome shows on the
+ * user's tab — for the whole window after the user already gave up.
+ */
+function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve()
+  return new Promise<void>((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const settle = (): void => {
+      if (timer !== undefined) clearTimeout(timer)
+      signal.removeEventListener('abort', settle)
+      resolve()
+    }
+    timer = setTimeout(settle, ms)
+    signal.addEventListener('abort', settle, { once: true })
+  })
+}
 
 /** Attach a recorder for a call that asked for one, tolerating a refusal. */
 async function beginCapture(tabId: number): Promise<{ session?: InspectionSession; note?: string }> {
@@ -1297,7 +1320,7 @@ async function dispatchInspectCall(call: ToolCall, signal: AbortSignal): Promise
   }
   try {
     if (reload) await chrome.tabs.reload(tabId)
-    await new Promise((resolve) => { setTimeout(resolve, ms) })
+    await sleepUnlessAborted(ms, signal)
     if (signal.aborted) {
       await session.abort()
       return cancelledAnswer()
@@ -1350,12 +1373,12 @@ async function dispatchEvaluateCall(call: ToolCall, signal: AbortSignal): Promis
   try {
     if (await chrome.permissions.contains({ permissions: ['debugger'] })) {
       const value = await evaluateOnTab(tabId, expression, chromeEvaluateDeps())
-      return { ok: true, result: { text: `Evaluated on ${target.url ?? 'the page'}:\n${value}` } }
+      return { ok: true, result: { text: renderEvaluation(target.url, value) } }
     }
     try {
       const port = await discoverRemoteCdpPort(chromeRemoteCdpDeps())
       const value = await evaluateViaRemoteCdp(tabId, target.url ?? '', expression, port, chromeRemoteCdpDeps())
-      return { ok: true, result: { text: `Evaluated on ${target.url ?? 'the page'} (remote-debugging port ${port}):\n${value}` } }
+      return { ok: true, result: { text: renderEvaluation(target.url, value, `remote-debugging port ${port}`) } }
     } catch (remoteError) {
       // A missing endpoint must fall through to the last resort; a genuine
       // evaluation failure should not be masked by trying a weaker path.
@@ -1363,12 +1386,13 @@ async function dispatchEvaluateCall(call: ToolCall, signal: AbortSignal): Promis
       if (!/no remote-debugging endpoint/.test(remoteMessage)) throw remoteError
     }
     const value = await evaluateViaScripting(tabId, expression, chromeScriptingDeps())
-    return { ok: true, result: { text: `Evaluated on ${target.url ?? 'the page'} (scripting path):\n${value}` } }
+    return { ok: true, result: { text: renderEvaluation(target.url, value, 'scripting path') } }
   } catch (error: unknown) {
     if (error instanceof EvaluateError) return { ok: false, error: { code: 'action-failed', message: error.message } }
     return { ok: false, error: { code: 'action-failed', message: error instanceof Error ? error.message : String(error) } }
   }
 }
+
 
 /** The live remote-debugging seams bound to real Chrome APIs. */
 function chromeRemoteCdpDeps(): RemoteCdpDeps {
