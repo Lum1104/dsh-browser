@@ -107,23 +107,38 @@ function affinityTab(tab: chrome.tabs.Tab): AffinityTab | null {
  * so the report is enclosed in the untrusted-content boundary exactly as a
  * snapshot or an inspection report is.
  *
+ * With page sharing `off` no page-authored text may leave the page at all, so
+ * `list` is refused outright — it is a pure read of what the user has open — and
+ * the remaining answers identify tabs by id rather than by title.
+ *
  * @param request - the parsed request.
  * @param deps - Chrome and affinity seams.
+ * @param sharePageContent - the user's page-sharing preference.
  * @returns model-facing text, inside the trust boundary.
  * @throws TabsError when the request cannot be carried out.
  */
-export async function runTabsAction(request: TabsRequest, deps: TabsDeps): Promise<string> {
-  return wrapDerivedReport(await renderTabsAction(request, deps))
+export async function runTabsAction(
+  request: TabsRequest,
+  deps: TabsDeps,
+  sharePageContent: 'ask' | 'auto' | 'off' = 'auto',
+): Promise<string> {
+  return wrapDerivedReport(await renderTabsAction(request, deps, sharePageContent !== 'off'))
 }
 
-async function renderTabsAction(request: TabsRequest, deps: TabsDeps): Promise<string> {
+async function renderTabsAction(request: TabsRequest, deps: TabsDeps, mayNamePages: boolean): Promise<string> {
   switch (request.action) {
     case 'list':
+      if (!mayNamePages) {
+        throw new TabsError(
+          'action-failed',
+          'Listing tabs would report the titles and addresses of pages you have open. Page content sharing is disabled in Settings > Page content sharing.',
+        )
+      }
       return renderTabList(await summarizeTabs(deps))
     case 'open':
       return openTab(request, deps)
     case 'switch':
-      return switchTab(request.tabId!, request.activate === true, deps)
+      return switchTab(request.tabId!, request.activate === true, mayNamePages, deps)
     case 'close':
       return closeTab(request.tabId!, deps)
   }
@@ -170,7 +185,7 @@ async function openTab(request: TabsRequest, deps: TabsDeps): Promise<string> {
   return `Opened ${request.url!} in a new tab (tabId ${summary.tabId}) and moved browser control to it. Call browser_snapshot once it has loaded.`
 }
 
-async function switchTab(tabId: number, activate: boolean, deps: TabsDeps): Promise<string> {
+async function switchTab(tabId: number, activate: boolean, mayNamePages: boolean, deps: TabsDeps): Promise<string> {
   let tab: chrome.tabs.Tab
   try {
     tab = await deps.getTab(tabId)
@@ -184,7 +199,8 @@ async function switchTab(tabId: number, activate: boolean, deps: TabsDeps): Prom
   }
   if (activate) await deps.activateTab(tabId, tab.windowId)
   deps.bindControl(summary)
-  return `Browser control moved to tabId ${tabId} ("${summary.title}" — ${summary.url}). Call browser_snapshot to read it.`
+  const named = mayNamePages ? ` ("${summary.title}" — ${summary.url})` : ''
+  return `Browser control moved to tabId ${tabId}${named}. Call browser_snapshot to read it.`
 }
 
 async function closeTab(tabId: number, deps: TabsDeps): Promise<string> {

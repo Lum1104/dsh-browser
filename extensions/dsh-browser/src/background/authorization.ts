@@ -281,18 +281,19 @@ function safeInline(value: string, maxLength = 40): string {
  * whole call and names every destination origin — a research step that asked
  * once per URL would only teach the user to click through.
  *
+ * Page sharing is not consulted here: 'off' rejects these calls before they are
+ * ever dispatched, so a prompt is only ever built for a call that may run.
+ *
  * @param call - the tool call.
  * @param origins - every origin the call will visit.
- * @param sharePageContent - the user's page-sharing preference.
  * @param locale - UI locale for the summary.
- * @returns the prompt, or undefined when page sharing is disabled entirely.
+ * @returns the prompt covering the whole call.
  */
 export function researchApprovalPrompt(
   call: ToolCall,
   origins: readonly string[],
-  sharePageContent: 'ask' | 'auto' | 'off',
   locale: UiLocale = getUiLocale(),
-): ApprovalPrompt | undefined {
+): ApprovalPrompt {
   const shown = origins.slice(0, 6)
   const overflow = origins.length - shown.length
   const hosts = shown.join(', ') + (overflow > 0
@@ -317,7 +318,6 @@ export function researchApprovalPrompt(
     // Trusting one origin here would silently authorize every future fetch of
     // it, including authenticated pages, so proactive reads never offer trust.
     canTrust: false,
-    ...(sharePageContent === 'off' ? {} : {}),
   }
 }
 

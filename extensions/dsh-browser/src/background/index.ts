@@ -952,7 +952,7 @@ async function dispatchTabsCall(call: ToolCall, signal: AbortSignal): Promise<To
   }
   if (signal.aborted) return cancelledAnswer()
   try {
-    const text = await runTabsAction(parseTabsRequest(call.args), tabsDeps)
+    const text = await runTabsAction(parseTabsRequest(call.args), tabsDeps, settings.sharePageContent)
     return { ok: true, result: { text } }
   } catch (error: unknown) {
     if (error instanceof TabsError) return { ok: false, error: { code: error.code, message: error.message } }
@@ -1057,14 +1057,14 @@ async function dispatchProactiveCall(call: ToolCall, signal: AbortSignal): Promi
     switch (call.name) {
       case 'browser_search': {
         const request = parseSearchRequest(call.args)
-        const prompt = researchApprovalPrompt(call, requestOrigins([searchUrl(request)]), settings.sharePageContent)
+        const prompt = researchApprovalPrompt(call, requestOrigins([searchUrl(request)]))
         const refusal = await authorizeOrRefuse(prompt, signal, call.sessionId)
         if (refusal !== undefined) return refusal
         return { ok: true, result: { text: await runSearch(request, researchDeps) } }
       }
       case 'browser_read_pages': {
         const request = parseReadPagesRequest(call.args)
-        const prompt = researchApprovalPrompt(call, requestOrigins(request.urls), settings.sharePageContent)
+        const prompt = researchApprovalPrompt(call, requestOrigins(request.urls))
         const refusal = await authorizeOrRefuse(prompt, signal, call.sessionId)
         if (refusal !== undefined) return refusal
         return { ok: true, result: { text: await runReadPages(request, researchDeps) } }
@@ -1397,7 +1397,9 @@ async function dispatchEvaluateCall(call: ToolCall, signal: AbortSignal): Promis
 /** The live remote-debugging seams bound to real Chrome APIs. */
 function chromeRemoteCdpDeps(): RemoteCdpDeps {
   return {
-    fetch: (url) => fetch(url),
+    // Bounded like the bridge probe: three ports are tried in turn, and a
+    // socket that accepts but never answers would otherwise hang the call.
+    fetch: (url) => fetch(url, { signal: AbortSignal.timeout(1_500) }),
     connect: (url) => new WebSocket(url),
     plantProbe: async (probeTabId, value) => {
       await chrome.scripting.executeScript({

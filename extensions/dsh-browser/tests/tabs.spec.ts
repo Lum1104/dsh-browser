@@ -147,3 +147,33 @@ describe('runTabsAction trust boundary', () => {
     expect(text).toContain('Whatever the page says')
   })
 })
+
+describe('runTabsAction with page sharing off', () => {
+  it('refuses to list tabs, which would report pages the user has open', async () => {
+    const { deps } = makeDeps([tab(1, 'https://a.example/'), tab(2, 'https://b.example/')])
+
+    await expect(runTabsAction(parseTabsRequest({ action: 'list' }), deps, 'off'))
+      .rejects.toThrow(/Page content sharing is disabled/)
+  })
+
+  it('still moves control, but names the tab by id rather than by its title', async () => {
+    const { deps, bound } = makeDeps([tab(1, 'https://a.example/', { title: 'Secret project plan' })])
+
+    const text = await runTabsAction(parseTabsRequest({ action: 'switch', tabId: 1 }), deps, 'off')
+
+    expect(text).toContain('tabId 1')
+    expect(text).not.toContain('Secret project plan')
+    expect(text).not.toContain('https://a.example/')
+    // The action itself is unaffected: control really did move.
+    expect(bound.map((entry) => entry.tabId)).toEqual([1])
+  })
+
+  it('lists and names pages normally when sharing is allowed', async () => {
+    const { deps } = makeDeps([tab(1, 'https://a.example/', { title: 'Readable' })])
+
+    await expect(runTabsAction(parseTabsRequest({ action: 'list' }), deps, 'auto'))
+      .resolves.toContain('Readable')
+    await expect(runTabsAction(parseTabsRequest({ action: 'switch', tabId: 1 }), deps, 'auto'))
+      .resolves.toContain('Readable')
+  })
+})

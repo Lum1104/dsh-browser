@@ -170,14 +170,25 @@ async function resolveTargetId(
 async function attach(targetId: string, port: number, deps: RemoteCdpDeps): Promise<TargetSession> {
   const ws = deps.connect(`ws://127.0.0.1:${port}/devtools/page/${targetId}`)
   await new Promise<void>((resolve, reject) => {
+    const fail = (): void => { reject(new Error('could not open a debugging socket for this page')) }
     ws.addEventListener('open', () => resolve(), { once: true })
-    ws.addEventListener('error', () => reject(new Error('could not open a debugging socket for this page')), { once: true })
+    ws.addEventListener('error', fail, { once: true })
+    // A socket that closes without ever erroring would otherwise leave this
+    // promise pending for the rest of the turn.
+    ws.addEventListener('close', fail, { once: true })
   })
 
   let seq = 0
   const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
   ws.addEventListener('message', (event) => {
-    const frame = JSON.parse(String(event.data)) as { id?: number; error?: unknown; result?: unknown }
+    let frame: { id?: number; error?: unknown; result?: unknown }
+    try {
+      frame = JSON.parse(String(event.data)) as { id?: number; error?: unknown; result?: unknown }
+    } catch {
+      // A frame that is not JSON cannot be matched to a command; throwing here
+      // would surface as an unhandled error inside an event listener.
+      return
+    }
     if (typeof frame.id !== 'number') return
     const waiter = pending.get(frame.id)
     if (waiter === undefined) return
@@ -196,7 +207,9 @@ async function attach(targetId: string, port: number, deps: RemoteCdpDeps): Prom
       const id = seq
       return new Promise((resolve, reject) => {
         pending.set(id, { resolve, reject })
-        ws.send(JSON.stringify({ id, method, ...(params ?? {}) }))
+        // CDP takes arguments under `params`. Spreading them at the top level
+        // sends a command with no arguments at all, which the endpoint rejects.
+        ws.send(JSON.stringify({ id, method, ...(params === undefined ? {} : { params }) }))
       })
     },
     close() {
