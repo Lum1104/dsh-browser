@@ -40,16 +40,11 @@ describe('panel protocol', () => {
     receive?.({
       type: 'rpc.result',
       id: '12345678-1234-4234-8234-123456789aba',
-      ok: true,
-      result: {
-        result: {
-          ok: false,
-          error: {
-            code: 'attachment-error',
-            message: 'Model does not support image input.',
-            details: { reason: 'MODEL_DOES_NOT_SUPPORT_IMAGES' },
-          },
-        },
+      ok: false,
+      error: {
+        code: 'attachment-error',
+        message: 'Model does not support image input.',
+        details: { reason: 'MODEL_DOES_NOT_SUPPORT_IMAGES' },
       },
     })
 
@@ -291,7 +286,7 @@ describe('panel protocol', () => {
       type: 'rpc.result',
       id: '12345678-1234-4234-8234-123456789ac0',
       ok: true,
-      result: { result: { ok: true, value: 'reconnected' } },
+      result: 'reconnected',
     })
 
     await expect(pending).resolves.toBe('reconnected')

@@ -34,12 +34,12 @@ import ToolRegistry from '@deepseek-ai/dsh-tools'
 import LlmService, { type UserMessage } from '@deepseek-ai/dsh-llm'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
-import { createApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import * as BridgeBrowser from '../../src/index.ts'
+import { apiProxyControllers } from '../support/api-controller-shim.ts'
 
 const BRIDGE = '@yuxianglin/dsh-bridge-browser'
 const TOKEN = 'e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0'
@@ -52,18 +52,23 @@ const SessionPersistenceStub = {
   },
 }
 
-/** The gateway over the minimal spine, provided as ctx.apiProxy (model routing stubbed). */
+/** The sessionController/workspaceController services over the minimal spine (model routing stubbed). */
 const ApiHost = {
   name: 'api-host',
-  // Mirrors ApiProxyService.inject for the services this composition provides;
-  // 'workspaceRegistry' is REQUIRED — the gateway's workspace domain calls
-  // the service property, which Cordis gates on the inject list.
+  // Mirrors the real controllers' inject for the services this composition
+  // provides; 'workspaceRegistry' is REQUIRED — the gateway's workspace
+  // domain calls the service property, which Cordis gates on the inject list.
   inject: ['sessions', 'userQuestions', 'agents', 'workspaceRegistry'],
   apply(ctx: Context, config: { cwd: string }): void {
-    ctx.provide('apiProxy', createApiProxy(ctx, {
+    const { sessionController, workspaceController } = apiProxyControllers(ctx, {
       defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
       cwd: config.cwd,
-    }))
+    })
+    ctx.provide('sessionController', sessionController)
+    ctx.provide('workspaceController', workspaceController)
+    ctx.provide('settingsController', { describe: () => ({ writable: false, hasDocument: false, namespaces: [] }) } as never)
+    ctx.provide('credentialsController', { describe: async () => ({}) } as never)
+    ctx.provide('directoryPickerController', { pick: async () => null } as never)
   },
 }
 

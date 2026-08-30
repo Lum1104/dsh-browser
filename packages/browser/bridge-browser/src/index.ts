@@ -5,10 +5,11 @@
  * The bridge mounts its own upgrade route (`/ext/bridge`) on the host
  * webserver, OUTSIDE the /api trust fence — so it brings its own bearer-token
  * authentication (first frame `hello` within HELLO_TIMEOUT_MS). Gateway RPCs
- * from the extension are dispatched through the same fetch-shaped handler the
- * /api carrier uses, and session events are pumped per connection. Tools
- * execute by dispatching `tool.call` frames to the connected extension, which
- * performs the action in the tab explicitly controlled by the user.
+ * from the extension are dispatched in-process against the same injected Host
+ * business services the harness itself composes (`sessionController` et al.),
+ * and session events are pumped per connection from the raw Cordis event bus.
+ * Tools execute by dispatching `tool.call` frames to the connected extension,
+ * which performs the action in the tab explicitly controlled by the user.
  *
  * Opt-in by design: nothing is registered unless this plugin appears in the
  * composition. No dsh core code is touched.
@@ -16,17 +17,12 @@
  * @module @yuxianglin/dsh-bridge-browser
  */
 
-import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
-import type {} from '@deepseek-ai/dsh-attachment'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-tools'
-import type {} from '@deepseek-ai/dsh-host-apiproxy'
+import type {} from './harness-types.ts'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
-import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
-import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
-import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { BridgeServer } from './server.ts'
 import { BrowserContextInjector } from './browser-context.ts'
@@ -39,6 +35,11 @@ import {
 } from './protocol.ts'
 import { withSessionDeferral } from './session-deferral.ts'
 import { withSessionWorkspace } from './session-workspace.ts'
+import { createSessionApi } from './session-api.ts'
+import { createWorkspaceApi } from './workspace-api.ts'
+import { createCredentialsApi, createDirectoryPickerApi, createSettingsApi } from './privileged-api.ts'
+import { createLlmApi } from './llm-api.ts'
+import { openSessionEvents } from './session-events.ts'
 import { purgeSessionFiles, type SessionPurgeDeps } from './session-purge.ts'
 import { resolveToken } from './token.ts'
 
@@ -46,7 +47,17 @@ import { resolveToken } from './token.ts'
 export const name = 'bridge-browser'
 
 /** Services required by this plugin. */
-export const inject = ['webServer', 'apiProxy', 'tools', 'agents']
+export const inject = [
+  'webServer',
+  'sessionController',
+  'workspaceController',
+  'settingsController',
+  'credentialsController',
+  'directoryPickerController',
+  'llm',
+  'tools',
+  'agents',
+]
 
 /** Default per-tool-call budget (ms). */
 const DEFAULT_TOOL_TIMEOUT_MS = 90_000
@@ -132,16 +143,18 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const resolved = resolveConfig(config)
 
   const tokenRes = await resolveToken(resolved.token)
-  // Workspace grouping wraps the gateway create; session deferral wraps the
-  // result so materialization at first prompt still flows through grouping.
-  const api: ApiProxy = withSessionDeferral(
+  const workspaceApi = createWorkspaceApi(ctx)
+  // Workspace grouping wraps the session-call surface's create; session
+  // deferral wraps the result so materialization at first prompt still flows
+  // through grouping.
+  const sessionApi = withSessionDeferral(
     withSessionWorkspace(
-      ctx.apiProxy,
+      createSessionApi(ctx),
+      workspaceApi,
       resolved.sessionWorkspacePath,
       message => { ctx.logger.warn(message) },
     ),
     resolved.deferSessionCreate,
-    ctx.get('attachments')?.imageLimits,
   )
   const browserContext = new BrowserContextInjector(ctx.agents)
   ctx.on('agent/session-start', ({ agent }) => { browserContext.activate(agent) })
@@ -149,11 +162,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const purgeSession = async (sessionId: string): Promise<void> => {
     const runningSessionIds = new Set<string>()
     try {
-      const listed = await api.sessions.list({ rpcId: RpcId(randomUUID()), payload: {} })
-      if (listed.result.ok) {
-        for (const entry of listed.result.value.items) {
-          if (entry.running) runningSessionIds.add(entry.sessionId)
-        }
+      const listed = await sessionApi.list({}, new AbortController().signal)
+      for (const entry of listed.items) {
+        if (entry.running) runningSessionIds.add(entry.sessionId)
       }
     } catch {
       // Guard is best-effort: an unavailable listing must not block deletion,
@@ -165,8 +176,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
 
   const server = new BridgeServer({
     token: tokenRes.token,
-    apiHandler: toFetchHandler(api),
-    openEvents: (signal) => api.events.mux({ rpcId: RpcId(randomUUID()), payload: {} }, signal),
+    sessionApi,
+    workspaceApi,
+    settingsApi: createSettingsApi(ctx),
+    credentialsApi: createCredentialsApi(ctx),
+    directoryPickerApi: createDirectoryPickerApi(ctx),
+    llmApi: createLlmApi(ctx),
+    openSessionEvents: signal => openSessionEvents(ctx, signal),
     toolTimeoutMs: resolved.toolTimeoutMs,
     caps: {
       textOnly: true,

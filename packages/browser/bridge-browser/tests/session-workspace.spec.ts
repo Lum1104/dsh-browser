@@ -3,9 +3,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { ApiProxy, WorkspaceId } from '@deepseek-ai/dsh-host-apiproxy/api'
-import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
-import { withSessionWorkspace } from '../src/session-workspace.ts'
+import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
+import type { SessionCreateRequest, SessionCreateValue } from '../src/harness-types.ts'
+import type { BridgeSessionApi } from '../src/session-api.ts'
+import { withSessionWorkspace, type WorkspaceCreator } from '../src/session-workspace.ts'
 
 const WORKSPACE_ID = 'workspace-browser' as WorkspaceId
 const SESSION_ID = SessionId('session-browser')
@@ -21,154 +22,108 @@ async function tempWorkspacePath(): Promise<string> {
   return join(root, 'browser-sessions')
 }
 
-function sessionRequest(
-  payload: Parameters<ApiProxy['sessions']['create']>[0]['payload'] = {},
-  rpcId = 'session-rpc',
-): Parameters<ApiProxy['sessions']['create']>[0] {
-  return { rpcId: RpcId(rpcId), payload }
+function apiHarness() {
+  const create = vi.fn(async (_request: SessionCreateRequest): Promise<SessionCreateValue> => ({ sessionId: SESSION_ID }))
+  const api = { create } as unknown as BridgeSessionApi
+  return { api, create }
 }
 
-function apiHarness(options: {
-  workspace?: ApiProxy['workspace']['create']
-} = {}) {
-  const sessionCreate = vi.fn(async (request: Parameters<ApiProxy['sessions']['create']>[0]) => ({
-    rpcId: request.rpcId,
-    result: { ok: true as const, value: { sessionId: SESSION_ID } },
-  }))
-  const api = {
-    sessions: { create: sessionCreate },
-    ...(options.workspace === undefined ? {} : { workspace: { create: options.workspace } }),
-  } as unknown as ApiProxy
-  return { api, sessionCreate }
-}
-
-function workspaceSuccess(
-  inspect?: (path: string) => Promise<void>,
-): ApiProxy['workspace']['create'] {
-  return vi.fn(async (request) => {
-    const path = request.payload.path as string
-    await inspect?.(path)
-    return {
-      rpcId: request.rpcId,
-      result: {
-        ok: true,
-        value: {
-          created: true,
-          workspace: {
-            workspaceId: WORKSPACE_ID,
-            path,
-            title: 'browser-sessions',
-            sessionIds: [],
-            createdAt: '2026-08-06T00:00:00.000Z',
-            updatedAt: '2026-08-06T00:00:00.000Z',
-          },
+function workspaceSuccess(inspect?: (path: string) => Promise<void>): WorkspaceCreator {
+  return {
+    create: vi.fn(async (request: { path: string }) => {
+      await inspect?.(request.path)
+      return {
+        created: true,
+        workspace: {
+          workspaceId: WORKSPACE_ID,
+          path: request.path,
+          title: 'browser-sessions',
+          sessionIds: [],
+          createdAt: '2026-08-06T00:00:00.000Z',
+          updatedAt: '2026-08-06T00:00:00.000Z',
         },
-      },
-    }
-  })
+      }
+    }),
+  }
 }
 
 describe('withSessionWorkspace', () => {
   it('creates the directory before one cached workspace registration and injects its id', async () => {
     const workspacePath = await tempWorkspacePath()
-    const workspaceCreate = workspaceSuccess(async (path) => {
+    const workspaceController = workspaceSuccess(async (path) => {
       expect((await stat(path)).isDirectory()).toBe(true)
     })
-    const { api, sessionCreate } = apiHarness({ workspace: workspaceCreate })
+    const { api, create } = apiHarness()
     const warn = vi.fn()
-    const wrapped = withSessionWorkspace(api, workspacePath, warn)
+    const wrapped = withSessionWorkspace(api, workspaceController, workspacePath, warn)
     const chosenId = SessionId('session-chosen')
 
     await Promise.all([
-      wrapped.sessions.create(sessionRequest({ cwd: '/ignored', sessionId: chosenId }, 'first')),
-      wrapped.sessions.create(sessionRequest({}, 'second')),
+      wrapped.create({ cwd: '/ignored', sessionId: chosenId }),
+      wrapped.create({}),
     ])
 
-    expect(workspaceCreate).toHaveBeenCalledTimes(1)
-    expect(workspaceCreate).toHaveBeenCalledWith(expect.objectContaining({ payload: { path: workspacePath } }))
-    expect(sessionCreate).toHaveBeenNthCalledWith(1, {
-      rpcId: RpcId('first'),
-      payload: { sessionId: chosenId, workspaceId: WORKSPACE_ID },
-    })
-    expect(sessionCreate).toHaveBeenNthCalledWith(2, {
-      rpcId: RpcId('second'),
-      payload: { workspaceId: WORKSPACE_ID },
-    })
+    expect(workspaceController.create).toHaveBeenCalledTimes(1)
+    expect(workspaceController.create).toHaveBeenCalledWith({ path: workspacePath })
+    expect(create).toHaveBeenNthCalledWith(1, { sessionId: chosenId, workspaceId: WORKSPACE_ID })
+    expect(create).toHaveBeenNthCalledWith(2, { workspaceId: WORKSPACE_ID })
     expect(warn).not.toHaveBeenCalled()
   })
 
   it('passes an explicit workspace id through without preparing the configured workspace', async () => {
     const workspacePath = await tempWorkspacePath()
-    const workspaceCreate = workspaceSuccess()
-    const { api, sessionCreate } = apiHarness({ workspace: workspaceCreate })
-    const wrapped = withSessionWorkspace(api, workspacePath, vi.fn())
-    const request = sessionRequest({ workspaceId: 'workspace-explicit' as WorkspaceId })
+    const workspaceController = workspaceSuccess()
+    const { api, create } = apiHarness()
+    const wrapped = withSessionWorkspace(api, workspaceController, workspacePath, vi.fn())
+    const request: SessionCreateRequest = { workspaceId: 'workspace-explicit' as WorkspaceId }
 
-    await wrapped.sessions.create(request)
+    await wrapped.create(request)
 
-    expect(sessionCreate).toHaveBeenCalledWith(request)
-    expect(workspaceCreate).not.toHaveBeenCalled()
+    expect(create).toHaveBeenCalledWith(request)
+    expect(workspaceController.create).not.toHaveBeenCalled()
     await expect(stat(workspacePath)).rejects.toThrow()
   })
 
   it('returns the original API when grouping is opted out', () => {
-    const workspaceCreate = workspaceSuccess()
-    const { api } = apiHarness({ workspace: workspaceCreate })
+    const workspaceController = workspaceSuccess()
+    const { api } = apiHarness()
 
-    expect(withSessionWorkspace(api, '', vi.fn())).toBe(api)
-    expect(workspaceCreate).not.toHaveBeenCalled()
-  })
-
-  it('caches a missing workspace domain and falls through to plain session creation', async () => {
-    const workspacePath = await tempWorkspacePath()
-    const { api, sessionCreate } = apiHarness()
-    const warn = vi.fn()
-    const wrapped = withSessionWorkspace(api, workspacePath, warn)
-    const request = sessionRequest({ cwd: '/original' })
-
-    await wrapped.sessions.create(request)
-    await wrapped.sessions.create(request)
-
-    expect(sessionCreate).toHaveBeenCalledTimes(2)
-    expect(sessionCreate).toHaveBeenNthCalledWith(1, request)
-    expect(warn).toHaveBeenCalledOnce()
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('workspace API is unavailable'))
+    expect(withSessionWorkspace(api, workspaceController, '', vi.fn())).toBe(api)
+    expect(workspaceController.create).not.toHaveBeenCalled()
   })
 
   it('caches a workspace.create business failure and preserves session creation', async () => {
     const workspacePath = await tempWorkspacePath()
-    const workspaceCreate = vi.fn(async (request: Parameters<ApiProxy['workspace']['create']>[0]) => ({
-      rpcId: request.rpcId,
-      result: {
-        ok: false as const,
-        error: { code: 'internal' as const, message: 'workspace service missing', details: {} },
-      },
-    }))
-    const { api, sessionCreate } = apiHarness({ workspace: workspaceCreate })
+    const workspaceController: WorkspaceCreator = {
+      create: vi.fn(async () => { throw new Error('workspace service missing') }),
+    }
+    const { api, create } = apiHarness()
     const warn = vi.fn()
-    const wrapped = withSessionWorkspace(api, workspacePath, warn)
-    const request = sessionRequest()
+    const wrapped = withSessionWorkspace(api, workspaceController, workspacePath, warn)
+    const request: SessionCreateRequest = {}
 
-    await wrapped.sessions.create(request)
-    await wrapped.sessions.create(request)
+    await wrapped.create(request)
+    await wrapped.create(request)
 
-    expect(workspaceCreate).toHaveBeenCalledOnce()
-    expect(sessionCreate).toHaveBeenCalledTimes(2)
-    expect(sessionCreate).toHaveBeenNthCalledWith(1, request)
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('workspace.create failed'))
+    expect(workspaceController.create).toHaveBeenCalledOnce()
+    expect(create).toHaveBeenCalledTimes(2)
+    expect(create).toHaveBeenNthCalledWith(1, request)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('workspace service missing'))
   })
 
   it('catches a thrown workspace failure and preserves session creation', async () => {
     const workspacePath = await tempWorkspacePath()
-    const workspaceCreate = vi.fn(async () => { throw new Error('domain unavailable') })
-    const { api, sessionCreate } = apiHarness({ workspace: workspaceCreate })
+    const workspaceController: WorkspaceCreator = {
+      create: vi.fn(async () => { throw new Error('domain unavailable') }),
+    }
+    const { api, create } = apiHarness()
     const warn = vi.fn()
-    const wrapped = withSessionWorkspace(api, workspacePath, warn)
-    const request = sessionRequest({ cwd: '/original' })
+    const wrapped = withSessionWorkspace(api, workspaceController, workspacePath, warn)
+    const request: SessionCreateRequest = { cwd: '/original' }
 
-    await wrapped.sessions.create(request)
+    await wrapped.create(request)
 
-    expect(sessionCreate).toHaveBeenCalledWith(request)
+    expect(create).toHaveBeenCalledWith(request)
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('domain unavailable'))
   })
 })

@@ -88,9 +88,9 @@ export type ClientFrame =
 export type ServerFrame =
   /** Accepted after a valid `hello`. */
   | { t: 'hello.ok'; caps: BridgeCaps }
-  /** Reply to an `rpc` frame; `result` is the apiproxy ServerResponse envelope. */
+  /** Reply to an `rpc` frame; `result` is the business value the dispatched method returned. */
   | { t: 'rpc.result'; id: string; ok: true; result: unknown }
-  | { t: 'rpc.result'; id: string; ok: false; error: { code: string; message: string } }
+  | { t: 'rpc.result'; id: string; ok: false; error: { code: string; message: string; details?: unknown } }
   /** Receipt for a `respond` frame (normally `{ accepted: boolean }`). */
   | { t: 'respond.result'; id: string; ok: true; result: unknown }
   | { t: 'respond.result'; id: string; ok: false; error: { code: string; message: string } }

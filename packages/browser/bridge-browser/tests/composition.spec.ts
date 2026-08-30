@@ -2,11 +2,13 @@
  * REAL-composition coverage: a test-only cordis.yml booted through the
  * published Loader mounts the webserver, the minimal spine (sessions /
  * user-questions / agents / system-prompt / tools), a test-only api host
- * providing `ctx.apiProxy` over `createApiProxy` (the same shape the apiproxy
- * package's own tests use), and the bridge plugin itself. A real WebSocket
- * client then authenticates over a real socket and drives real gateway RPCs
- * against the real session store; disposal removes the tool registrations
- * (HMR safety).
+ * providing `ctx.sessionController`/`ctx.workspaceController` (built over the
+ * still-published `createApiProxy` gateway via `apiProxyControllers` — see
+ * `tests/support/api-controller-shim.ts` for why production code can't use
+ * the real, unpublished `dsh-api-session-controller` here), and the bridge
+ * plugin itself. A real WebSocket client then authenticates over a real
+ * socket and drives real RPCs against the real session store; disposal
+ * removes the tool registrations (HMR safety).
  *
  * Mocked boundary: only the api host's model routing defaults (no LLM
  * adapter) — RPCs exercised here (session.create/list) never touch the model.
@@ -29,9 +31,9 @@ import ToolRegistry from '@deepseek-ai/dsh-tools'
 import LlmService from '@deepseek-ai/dsh-llm'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
-import { createApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import * as BridgeBrowser from '../src/index.ts'
 import { BRIDGE_PATH, type BridgeFrame } from '../src/protocol.ts'
+import { apiProxyControllers } from './support/api-controller-shim.ts'
 
 const BRIDGE = '@yuxianglin/dsh-bridge-browser'
 const TOKEN = 'abcdabcdabcdabcdabcdabcdabcdabcd'
@@ -47,19 +49,24 @@ afterEach(async () => {
 })
 
 /**
- * The gateway over the minimal spine, provided as `ctx.apiProxy` — the same
- * factory the apiproxy package's own tests use. Model routing is stubbed
- * (provider/model names only; no adapter), which is the one external
+ * The `sessionController`/`workspaceController` services over the minimal
+ * spine, built from the still-published apiproxy gateway. Model routing is
+ * stubbed (provider/model names only; no adapter), which is the one external
  * boundary this composition does not exercise.
  */
 const ApiHost = {
   name: 'api-host',
   inject: ['sessions', 'userQuestions', 'agents'],
   apply(ctx: Context, config: { cwd: string }): void {
-    ctx.provide('apiProxy', createApiProxy(ctx, {
+    const { sessionController, workspaceController } = apiProxyControllers(ctx, {
       defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
       cwd: config.cwd,
-    }))
+    })
+    ctx.provide('sessionController', sessionController)
+    ctx.provide('workspaceController', workspaceController)
+    ctx.provide('settingsController', { describe: () => ({ writable: false, hasDocument: false, namespaces: [] }) } as never)
+    ctx.provide('credentialsController', { describe: async () => ({}) } as never)
+    ctx.provide('directoryPickerController', { pick: async () => null } as never)
   },
 }
 
@@ -193,7 +200,7 @@ describe('real Loader composition', () => {
     await waitFor(() => client.frames.some((f) => f.t === 'rpc.result' && f.id === 'c-1'))
     const created = client.frames.find((f): f is Extract<BridgeFrame, { t: 'rpc.result' }> => f.t === 'rpc.result' && f.id === 'c-1')!
     expect(created.ok).toBe(true)
-    const sessionId = ((created as { result: { result: { value: { sessionId: string } } } }).result).result.value.sessionId
+    const sessionId = (created as { result: { sessionId: string } }).result.sessionId
     expect(sessionId).toMatch(/^session-[0-9a-f-]{36}$/)
     expect(ctx.sessions.get(SessionId(sessionId))?.header.cwd).toBe(root)
 
