@@ -5,6 +5,8 @@ import WebSocket from 'ws'
 import type { MuxFrame, RpcRequest } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { BridgeServer, BridgeToolError, isExtensionOrigin, isLoopbackAddress, messageToText, payloadCode, payloadMessage } from '../src/server.ts'
+import { BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, type BridgeFrame } from '../src/protocol.ts'
+import { SessionPurgeError } from '../src/session-purge.ts'
 
 const TOKEN = 'deadbeefdeadbeefdeadbeefdeadbeef'
 

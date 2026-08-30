@@ -909,13 +909,15 @@ const tabsDeps: TabsDeps = {
     await chrome.tabs.update(tabId, { active: true })
     await chrome.windows.update(windowId, { focused: true })
   },
-  bindControl: (tab) => {
+  bindControl: (tab, sessionId) => {
     // The previous page's pending approvals describe work on a page that is no
     // longer the target, so they are withdrawn. In-flight tool calls are NOT
     // cancelled: this runs inside one of them.
     const previous = tabAffinity.snapshot().controlled?.tabId
-    activeFollowRefresh?.abort()
-    cancelPendingApprovals()
+    if (sessionId !== undefined) {
+      activeFollowRefreshes.get(sessionId)?.abort()
+    }
+    cancelPendingApprovals(sessionId)
     tabAffinity.bindTool(tab)
     if (previous !== undefined && previous !== tab.tabId) resetTabSnapshot(previous)
     resetTabSnapshot(tab.tabId)
@@ -952,7 +954,7 @@ async function dispatchTabsCall(call: ToolCall, signal: AbortSignal): Promise<To
   }
   if (signal.aborted) return cancelledAnswer()
   try {
-    const text = await runTabsAction(parseTabsRequest(call.args), tabsDeps, settings.sharePageContent)
+    const text = await runTabsAction(parseTabsRequest(call.args), tabsDeps, settings.sharePageContent, call.sessionId)
     return { ok: true, result: { text } }
   } catch (error: unknown) {
     if (error instanceof TabsError) return { ok: false, error: { code: error.code, message: error.message } }
@@ -1118,7 +1120,7 @@ async function authorizeOrRefuse(
 async function dispatchVerifyCall(call: ToolCall, signal: AbortSignal): Promise<ToolAnswer> {
   await affinityReady
   if (signal.aborted) return cancelledAnswer()
-  const target = await resolveToolTab()
+  const target = await resolveToolTab(call.sessionId)
   if ('ok' in target) return target
   const tabId = target.id
   if (tabId === undefined) return { ok: false, error: { code: 'no-active-tab', message: 'No active tab is available for browser operations.' } }
@@ -1137,7 +1139,7 @@ async function dispatchVerifyCall(call: ToolCall, signal: AbortSignal): Promise<
   // The located report names widgets by their page-authored frame titles and
   // URLs, so it is enclosed; the click outcome below is the extension's own.
   if (point === undefined) return { ok: true, result: { text: wrapDerivedReport(located.text) } }
-  if (!tabAffinity.allowsTarget(tabId)) {
+  if (!tabAffinity.allowsTarget(tabId, call.sessionId)) {
     return { ok: false, error: { code: 'content-unavailable', message: 'The controlled tab changed before the verification click.' } }
   }
 
@@ -1253,7 +1255,7 @@ function withInspection(answer: ToolAnswer, section: string): ToolAnswer {
  * debugging banner up on the user's tab.
  */
 async function dispatchPageCall(call: ToolCall, signal: AbortSignal, budget?: ContentBudget): Promise<ToolAnswer> {
-  const target = await resolveToolTab()
+  const target = await resolveToolTab(call.sessionId)
   if ('ok' in target) return target
   const wantsCapture = call.args.capture === true && target.id !== undefined
   const capture = wantsCapture ? await beginCapture(target.id!) : {}
@@ -1265,7 +1267,7 @@ async function dispatchPageCall(call: ToolCall, signal: AbortSignal, budget?: Co
       (prompt) => authorizeToolCall(prompt, signal, target.windowId, call.sessionId),
       signal,
       target,
-      () => target.id !== undefined && tabAffinity.allowsTarget(target.id),
+      () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
       caps?.images,
     )
     if (capture.session === undefined) {
@@ -1292,7 +1294,7 @@ async function dispatchPageCall(call: ToolCall, signal: AbortSignal, budget?: Co
 async function dispatchInspectCall(call: ToolCall, signal: AbortSignal): Promise<ToolAnswer> {
   await affinityReady
   if (signal.aborted) return cancelledAnswer()
-  const target = await resolveToolTab()
+  const target = await resolveToolTab(call.sessionId)
   if ('ok' in target) return target
   const tabId = target.id
   if (tabId === undefined) {
@@ -1349,7 +1351,7 @@ async function dispatchInspectCall(call: ToolCall, signal: AbortSignal): Promise
 async function dispatchEvaluateCall(call: ToolCall, signal: AbortSignal): Promise<ToolAnswer> {
   await affinityReady
   if (signal.aborted) return cancelledAnswer()
-  const target = await resolveToolTab()
+  const target = await resolveToolTab(call.sessionId)
   if ('ok' in target) return target
   const tabId = target.id
   if (tabId === undefined) {

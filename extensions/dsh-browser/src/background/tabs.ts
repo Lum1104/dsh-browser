@@ -42,7 +42,7 @@ export interface TabsDeps {
   closeTab(tabId: number): Promise<void>
   activateTab(tabId: number, windowId: number): Promise<void>
   /** Move browser control to this tab and broadcast the new affinity state. */
-  bindControl(tab: AffinityTab): void
+  bindControl(tab: AffinityTab, sessionId?: string): void
   /** The tab browser tools currently operate on. */
   controlledTabId(): number | undefined
 }
@@ -121,11 +121,12 @@ export async function runTabsAction(
   request: TabsRequest,
   deps: TabsDeps,
   sharePageContent: 'ask' | 'auto' | 'off' = 'auto',
+  sessionId?: string,
 ): Promise<string> {
-  return wrapDerivedReport(await renderTabsAction(request, deps, sharePageContent !== 'off'))
+  return wrapDerivedReport(await renderTabsAction(request, deps, sharePageContent !== 'off', sessionId))
 }
 
-async function renderTabsAction(request: TabsRequest, deps: TabsDeps, mayNamePages: boolean): Promise<string> {
+async function renderTabsAction(request: TabsRequest, deps: TabsDeps, mayNamePages: boolean, sessionId?: string): Promise<string> {
   switch (request.action) {
     case 'list':
       if (!mayNamePages) {
@@ -136,9 +137,9 @@ async function renderTabsAction(request: TabsRequest, deps: TabsDeps, mayNamePag
       }
       return renderTabList(await summarizeTabs(deps))
     case 'open':
-      return openTab(request, deps)
+      return openTab(request, deps, sessionId)
     case 'switch':
-      return switchTab(request.tabId!, request.activate === true, mayNamePages, deps)
+      return switchTab(request.tabId!, request.activate === true, mayNamePages, deps, sessionId)
     case 'close':
       return closeTab(request.tabId!, deps)
   }
@@ -173,7 +174,7 @@ function renderTabList(tabs: TabSummary[]): string {
   return lines.join('\n')
 }
 
-async function openTab(request: TabsRequest, deps: TabsDeps): Promise<string> {
+async function openTab(request: TabsRequest, deps: TabsDeps, sessionId?: string): Promise<string> {
   const takeControl = request.control !== false
   const tab = await deps.createTab(request.url!, request.activate === true)
   const summary = affinityTab(tab)
@@ -181,11 +182,11 @@ async function openTab(request: TabsRequest, deps: TabsDeps): Promise<string> {
   if (!takeControl) {
     return `Opened ${request.url!} in a new background tab (tabId ${summary.tabId}). Browser control stayed on the previous page; switch to it to operate there.`
   }
-  deps.bindControl(summary)
+  deps.bindControl(summary, sessionId)
   return `Opened ${request.url!} in a new tab (tabId ${summary.tabId}) and moved browser control to it. Call browser_snapshot once it has loaded.`
 }
 
-async function switchTab(tabId: number, activate: boolean, mayNamePages: boolean, deps: TabsDeps): Promise<string> {
+async function switchTab(tabId: number, activate: boolean, mayNamePages: boolean, deps: TabsDeps, sessionId?: string): Promise<string> {
   let tab: chrome.tabs.Tab
   try {
     tab = await deps.getTab(tabId)
@@ -198,7 +199,7 @@ async function switchTab(tabId: number, activate: boolean, mayNamePages: boolean
     throw new TabsError('action-failed', `Tab ${tabId} is not a standard http or https page, so browser tools cannot operate on it.`)
   }
   if (activate) await deps.activateTab(tabId, tab.windowId)
-  deps.bindControl(summary)
+  deps.bindControl(summary, sessionId)
   const named = mayNamePages ? ` ("${summary.title}" — ${summary.url})` : ''
   return `Browser control moved to tabId ${tabId}${named}. Call browser_snapshot to read it.`
 }
