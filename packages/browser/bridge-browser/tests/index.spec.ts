@@ -4,21 +4,30 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type { MuxFrame, RpcRequest } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { apply, assertPositiveInteger, Config, resolveConfig } from '../src/index.ts'
 
 /** Minimal context stub: apply only needs the services at registration time. */
 function stubContext(): Context {
+  const apiProxy = {
+    sessions: {
+      list: async () => ({ rpcId: 'x', result: { ok: true, value: { items: [] } } }),
+    },
+    events: {
+      mux: async function* (_request: RpcRequest<{}>, _signal: AbortSignal): AsyncIterable<RpcRequest<MuxFrame>> {},
+    },
+    respond: async () => ({ rpcId: 'x', accepted: true as const }),
+  } as unknown as ApiProxy
   return {
-    apiProxy: { sessions: {} } as ApiProxy,
     webServer: { port: 0, registerUpgrade: () => () => {}, register: () => () => {} },
     tools: { register: () => () => {} },
     agents: { get: () => undefined },
-    get: () => undefined,
+    get: (key: string) => (key === 'apiProxy' ? apiProxy : undefined),
     on: () => () => {},
     logger: { info: () => {}, warn: () => {}, error: () => {} },
-    effect: (fn: () => unknown, label?: string) => {
-      void label
+    effect: (fn: () => unknown, _label?: string) => {
+      void _label
       return fn() as () => void
     },
   } as unknown as Context

@@ -27,6 +27,8 @@ import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
+import { resolveBridgeGateway, waitForGateway } from './gateway-access.ts'
+import { createTypertFetchHandler } from './typert-api-proxy.ts'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { BridgeServer } from './server.ts'
 import { BrowserContextInjector } from './browser-context.ts'
@@ -45,8 +47,8 @@ import { resolveToken } from './token.ts'
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'bridge-browser'
 
-/** Services required by this plugin. */
-export const inject = ['webServer', 'apiProxy', 'tools', 'agents']
+/** Services required by this plugin. Gateway access resolves ApiProxy or Typert at runtime. */
+export const inject = ['webServer', 'tools', 'agents']
 
 /** Default per-tool-call budget (ms). */
 const DEFAULT_TOOL_TIMEOUT_MS = 90_000
@@ -132,11 +134,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const resolved = resolveConfig(config)
 
   const tokenRes = await resolveToken(resolved.token)
-  // Workspace grouping wraps the gateway create; session deferral wraps the
-  // result so materialization at first prompt still flows through grouping.
+  const connection = { hasConnection: (): boolean => false }
+  const gatewayKind = await waitForGateway(ctx)
+  const gateway = await resolveBridgeGateway(ctx, connection)
   const api: ApiProxy = withSessionDeferral(
     withSessionWorkspace(
-      ctx.apiProxy,
+      gateway.api,
       resolved.sessionWorkspacePath,
       message => { ctx.logger.warn(message) },
     ),
@@ -163,10 +166,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     await purgeSessionFiles(deps, sessionId)
   }
 
+  const apiHandler = gatewayKind === 'apiProxy'
+    ? toFetchHandler(api)
+    : createTypertFetchHandler(api)
+
   const server = new BridgeServer({
     token: tokenRes.token,
-    apiHandler: toFetchHandler(api),
-    openEvents: (signal) => api.events.mux({ rpcId: RpcId(randomUUID()), payload: {} }, signal),
+    apiHandler,
+    openEvents: gateway.openEvents,
     toolTimeoutMs: resolved.toolTimeoutMs,
     caps: {
       textOnly: true,
@@ -176,6 +183,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     injectBrowserSnapshot: (sessionId, snapshot) => { browserContext.inject(sessionId, snapshot) },
     purgeSession,
   })
+  connection.hasConnection = () => server.hasConnection()
 
   const route: WebUpgradeRoute = {
     path: BRIDGE_PATH,
