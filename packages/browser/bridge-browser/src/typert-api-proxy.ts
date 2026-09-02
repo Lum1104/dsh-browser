@@ -160,9 +160,14 @@ export function createTypertApiProxy(
     request: RpcRequest<Record<string, unknown>>,
     adaptArgs?: (payload: Record<string, unknown>) => Record<string, unknown>,
   ): Promise<RpcResponse<unknown>> => {
-    noteSessionId(extensionSessions, request.payload.sessionId)
     const response = await call(namespace, method, request, adaptArgs)
-    if (response.result.ok) noteSessionId(extensionSessions, response.result.value)
+    // Only claim ownership after a successful create/prompt. A failed prompt
+    // against a Desktop session must not steal later ask_user_question away
+    // from the native waterfall.
+    if (response.result.ok) {
+      noteSessionId(extensionSessions, request.payload.sessionId)
+      noteSessionId(extensionSessions, response.result.value)
+    }
     return response
   }
 

@@ -9,7 +9,7 @@
 export class ExtensionSessionRegistry {
   private readonly ids = new Set<string>()
 
-  /** Remember a session created or prompted through the bridge. */
+  /** Remember a session the extension successfully created or prompted. */
   note(sessionId: string | undefined): void {
     if (typeof sessionId === 'string' && sessionId.length > 0) this.ids.add(sessionId)
   }
