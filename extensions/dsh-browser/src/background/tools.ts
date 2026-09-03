@@ -434,6 +434,11 @@ export async function dispatchToolCall(
     const refreshedTargetError = validateElementTarget(call, tab.id, executionFrames)
     if (refreshedTargetError !== undefined) return refreshedTargetError
   }
+  if (call.name === 'browser_set_viewport') {
+    if (isCancelled(call, signal)) return cancelled()
+    if (targetStillAllowed?.() === false) return targetChanged()
+    return setViewportWindow(tab.id, call.args)
+  }
   try {
     return await dispatchOnce(
       tab.id,
@@ -503,6 +508,30 @@ function validateElementTarget(call: ToolCall, tabId: number, frames: TabFrame[]
     return unavailable('The element reference does not belong to the current document. Call browser_snapshot again for current frame and index values.')
   }
   return undefined
+}
+
+/** Resize the browser window hosting the controlled tab via chrome.windows. */
+async function setViewportWindow(tabId: number, args: Record<string, unknown>): Promise<ToolAnswer> {
+  const rawWidth = args.width
+  const rawHeight = args.height
+  const width = typeof rawWidth === 'number' ? rawWidth : undefined
+  const height = typeof rawHeight === 'number' ? rawHeight : undefined
+  if (width === undefined && height === undefined) {
+    return { ok: false, error: { code: 'action-failed', message: 'browser_set_viewport requires at least one of width or height (CSS pixels).' } }
+  }
+  const valid = (value: number | undefined): boolean => value === undefined || (Number.isInteger(value) && value > 0)
+  if (!valid(width) || !valid(height)) {
+    return { ok: false, error: { code: 'action-failed', message: 'width and height must be positive integers (CSS pixels).' } }
+  }
+  const tab = await chrome.tabs.get(tabId)
+  // Chrome ignores width/height while a window is maximized or fullscreen, so
+  // drop back to a normal (restorable) state before applying the bounds.
+  const updates: chrome.windows.UpdateInfo = { state: 'normal' }
+  if (width !== undefined) updates.width = width
+  if (height !== undefined) updates.height = height
+  const win = await chrome.windows.update(tab.windowId, updates)
+  const text = `Browser window resized to ${width === undefined ? 'unchanged width' : `${width}px`} x ${height === undefined ? 'unchanged height' : `${height}px`}. The focused window's outer bounds are now ${win.width ?? 'unknown'} x ${win.height ?? 'unknown'} px. Use browser_snapshot to see how the page reflowed.`
+  return { ok: true, result: { text } }
 }
 
 function sameApprovalBoundary(before: ApprovalPrompt, after: ApprovalPrompt): boolean {

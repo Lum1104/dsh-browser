@@ -14,6 +14,7 @@ const STATE_CHANGING_ACTIONS = new Set([
   'browser_back',
   'browser_forward',
   'browser_reload',
+  'browser_set_viewport',
 ])
 
 /** Return an approval prompt, or undefined when this call needs no prompt. */
@@ -122,6 +123,17 @@ function summarizeAction(call: ToolCall, locale: UiLocale): string {
     case 'browser_back': return localized(locale, 'Go back in browser history (destination domain unknown)', '返回浏览历史上一页（目标域名未知）')
     case 'browser_forward': return localized(locale, 'Go forward in browser history (destination domain unknown)', '前进到浏览历史下一页（目标域名未知）')
     case 'browser_reload': return localized(locale, 'Reload the current page', '重新加载当前页面')
+    case 'browser_set_viewport': {
+      const rawWidth = typeof call.args.width === 'number' ? call.args.width : null
+      const rawHeight = typeof call.args.height === 'number' ? call.args.height : null
+      const width = rawWidth === null ? '当前宽度' : String(rawWidth)
+      const height = rawHeight === null ? '当前高度' : String(rawHeight)
+      return localized(
+        locale,
+        `Resize the browser window to ${width} x ${height} CSS pixels`,
+        `将浏览器窗口调整为 ${width} x ${height} CSS 像素`,
+      )
+    }
     default: return call.name
   }
 }

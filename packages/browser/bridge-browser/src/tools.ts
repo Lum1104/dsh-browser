@@ -61,6 +61,7 @@ export const BROWSER_TOOL_NAMES = [
   'browser_back',
   'browser_forward',
   'browser_reload',
+  'browser_set_viewport',
   'browser_get_text',
   'browser_wait',
 ] as const
@@ -205,6 +206,24 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     execute: (args, exec) => call(exec, 'browser_navigate', args as Record<string, unknown>),
   })
 
+  const setViewport = (): ToolDefinition => defineTool({
+    name: 'browser_set_viewport',
+    description: 'Resize the controlled browser window to a target width and/or height measured in CSS pixels (at least one of width or height is required). Use it to test how a page renders and reflows at different window/viewport sizes.',
+    parameters: {
+      width: { type: 'number', description: 'Target window width in CSS pixels.' },
+      height: { type: 'number', description: 'Target window height in CSS pixels.' },
+    },
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: (args, exec) => {
+      const a = args as { width?: number; height?: number }
+      return call(exec, 'browser_set_viewport', {
+        ...a.width !== undefined ? { width: a.width } : {},
+        ...a.height !== undefined ? { height: a.height } : {},
+      })
+    },
+  })
+
   const simple = (name: 'browser_back' | 'browser_forward' | 'browser_reload', description: string): ToolDefinition => defineTool({
     name,
     description,
@@ -257,6 +276,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     press(),
     scroll(),
     navigate(),
+    setViewport(),
     simple('browser_back', 'Go back to the previous page.'),
     simple('browser_forward', 'Go forward to the next page.'),
     simple('browser_reload', 'Reload the current page.'),
