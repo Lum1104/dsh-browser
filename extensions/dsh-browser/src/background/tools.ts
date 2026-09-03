@@ -510,6 +510,10 @@ function validateElementTarget(call: ToolCall, tabId: number, frames: TabFrame[]
   return undefined
 }
 
+// Tracks tabs whose debugger session was successfully attached by THIS extension,
+// so a re-attach rejection can be told apart from "another debugger owns the tab".
+const viewportDebuggerTabs = new Set<number>()
+
 /** Set the controlled tab's page viewport via CDP device-metrics override. */
 async function setViewportWindow(tabId: number, args: Record<string, unknown>): Promise<ToolAnswer> {
   const width = typeof args.width === 'number' ? args.width : undefined
@@ -521,22 +525,43 @@ async function setViewportWindow(tabId: number, args: Record<string, unknown>): 
     return { ok: false, error: { code: 'action-failed', message: 'width and height must be positive integers (CSS pixels).' } }
   }
   const tab = await chrome.tabs.get(tabId)
-  // Attach the debugger so the Emulation domain is available. If an override is
-  // already active (set by an earlier call), attach is rejected but the existing
-  // debug session still serves the command below.
-  try { await chrome.debugger.attach(tab.id, '1.3') } catch (err) {
+  // Attach the debugger so the Emulation domain is available. On a duplicate
+  // attach Chrome rejects with "another debugger is already attached", but the
+  // existing session may be ours (set up by an earlier call) OR someone else's
+  // (open DevTools, another extension). We must only continue when it is ours:
+  // otherwise sendCommand below would throw instead of returning a controlled
+  // action-failed result.
+  let ownSession = false
+  try {
+    await chrome.debugger.attach(tab.id, '1.3')
+    ownSession = true
+  } catch (err) {
     if (!isDebuggerAttachedError(err)) {
       return { ok: false, error: { code: 'action-failed', message: 'Could not attach the debugger to control the page viewport.' } }
     }
+    // "another debugger is already attached": reuse the session only if a prior
+    // call attached it for this extension; otherwise the session is not ours.
+    ownSession = viewportDebuggerTabs.has(tab.id)
+    if (!ownSession) {
+      return { ok: false, error: { code: 'action-failed', message: 'Could not control the page viewport: another debugger (DevTools or another extension) already owns this tab. Close it and try again.' } }
+    }
   }
+  if (ownSession) viewportDebuggerTabs.add(tab.id)
   // The device-metrics override drives the page's CSS viewport exactly,
-  // independent of the window's outer bounds and OS window decorations.
-  await chrome.debugger.sendCommand(tab.id, 'Emulation.setDeviceMetricsOverride', {
-    width,
-    height,
-    deviceScaleFactor: 0,
-    mobile: false,
-  })
+  // independent of the window's outer bounds and OS window decorations. Guarded
+  // so a session lost in between (e.g. DevTools forces a detach) returns a
+  // controlled action-failed result instead of an uncaught internal error.
+  try {
+    await chrome.debugger.sendCommand(tab.id, 'Emulation.setDeviceMetricsOverride', {
+      width,
+      height,
+      deviceScaleFactor: 0,
+      mobile: false,
+    })
+  } catch (err) {
+    viewportDebuggerTabs.delete(tab.id)
+    return { ok: false, error: { code: 'action-failed', message: 'Could not apply the viewport override: the debugger session is no longer available. Close any open DevTools and try again.' } }
+  }
   const text = `Page viewport set to ${width} x ${height} CSS pixels via device-style emulation; the controlled tab now renders at exactly this viewport, independent of the browser window size (the browser may show a debug indicator). Use browser_snapshot to see how the page reflowed.`
   return { ok: true, result: { text } }
 }
