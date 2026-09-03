@@ -518,10 +518,14 @@ const viewportDebuggerTabs = new Set<number>()
 async function setViewportWindow(tabId: number, args: Record<string, unknown>): Promise<ToolAnswer> {
   const width = typeof args.width === 'number' ? args.width : undefined
   const height = typeof args.height === 'number' ? args.height : undefined
-  if (width === undefined || height === undefined) {
-    return { ok: false, error: { code: 'action-failed', message: 'browser_set_viewport requires both width and height (CSS pixels).' } }
+  // The bridge schema exposes width and height as optional and forwards only the
+  // provided dimension(s), so a caller may adjust a single axis and keep the
+  // other unchanged. Validate each provided dimension; at least one is required.
+  if (width === undefined && height === undefined) {
+    return { ok: false, error: { code: 'action-failed', message: 'browser_set_viewport requires at least one of width or height (CSS pixels).' } }
   }
-  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+  const isPositiveInt = (value: number): boolean => Number.isInteger(value) && value > 0
+  if ((width !== undefined && !isPositiveInt(width)) || (height !== undefined && !isPositiveInt(height))) {
     return { ok: false, error: { code: 'action-failed', message: 'width and height must be positive integers (CSS pixels).' } }
   }
   const tab = await chrome.tabs.get(tabId)
@@ -547,14 +551,27 @@ async function setViewportWindow(tabId: number, args: Record<string, unknown>): 
     }
   }
   if (ownSession) viewportDebuggerTabs.add(tab.id)
+  // Resolve an unspecified dimension from the current page viewport so a
+  // single-axis request preserves the other axis instead of failing or zeroing it.
+  let widthValue = width
+  let heightValue = height
+  if (widthValue === undefined || heightValue === undefined) {
+    const current = await readViewportDimensions(tab.id)
+    if (current === undefined) {
+      viewportDebuggerTabs.delete(tab.id)
+      return { ok: false, error: { code: 'action-failed', message: 'Could not read the current viewport to preserve the unspecified dimension (width/height).' } }
+    }
+    if (widthValue === undefined) widthValue = current.width
+    if (heightValue === undefined) heightValue = current.height
+  }
   // The device-metrics override drives the page's CSS viewport exactly,
   // independent of the window's outer bounds and OS window decorations. Guarded
   // so a session lost in between (e.g. DevTools forces a detach) returns a
   // controlled action-failed result instead of an uncaught internal error.
   try {
     await chrome.debugger.sendCommand(tab.id, 'Emulation.setDeviceMetricsOverride', {
-      width,
-      height,
+      width: widthValue,
+      height: heightValue,
       deviceScaleFactor: 0,
       mobile: false,
     })
@@ -562,8 +579,23 @@ async function setViewportWindow(tabId: number, args: Record<string, unknown>): 
     viewportDebuggerTabs.delete(tab.id)
     return { ok: false, error: { code: 'action-failed', message: 'Could not apply the viewport override: the debugger session is no longer available. Close any open DevTools and try again.' } }
   }
-  const text = `Page viewport set to ${width} x ${height} CSS pixels via device-style emulation; the controlled tab now renders at exactly this viewport, independent of the browser window size (the browser may show a debug indicator). Use browser_snapshot to see how the page reflowed.`
+  const text = `Page viewport set to ${widthValue} x ${heightValue} CSS pixels via device-style emulation; the controlled tab now renders at exactly this viewport, independent of the browser window size (the browser may show a debug indicator). Use browser_snapshot to see how the page reflowed.`
   return { ok: true, result: { text } }
+}
+
+// Reads the current CSS viewport dimensions (in CSS pixels) of a tab via the
+// Chrome DevTools Protocol. Returns undefined if it cannot be determined.
+async function readViewportDimensions(tabId: number): Promise<{ width: number; height: number } | undefined> {
+  try {
+    const metrics = await chrome.debugger.sendCommand(tabId, 'Page.getLayoutMetrics') as { layoutViewport?: { clientWidth?: number; clientHeight?: number }; cssVisualViewport?: { clientWidth?: number; clientHeight?: number } }
+    const vp = metrics?.layoutViewport ?? metrics?.cssVisualViewport
+    const width = Math.round(vp?.clientWidth ?? 0)
+    const height = Math.round(vp?.clientHeight ?? 0)
+    if (width > 0 && height > 0) return { width, height }
+  } catch (err) {
+    // underlying page may reject Page.getLayoutMetrics under certain sessions
+  }
+  return undefined
 }
 
 function isDebuggerAttachedError(err: unknown): boolean {
