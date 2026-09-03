@@ -8,6 +8,14 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
     }
   },
   "type": "module",
@@ -26,6 +34,7 @@
       "types": "./lib/types/invariant.d.ts",
       "default": "./lib/invariant.js"
     },
+    "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./src/*": "./src/*",
     "./package.json": "./package.json"
@@ -34,6 +43,7 @@
     "lib/index.js",
     "lib/invariant.js",
     "lib/protocol.js",
+    "lib/client.js",
     "lib/types/**/*.d.ts",
     "cordis.patch.yml",
     "src"
@@ -42,12 +52,30 @@
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-agent": "^0.1.1-rc.1",
     "@deepseek-ai/dsh-attachment": "^0.1.1-rc.1",
+    "@deepseek-ai/dsh-client-locale": "^0.1.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.1.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.1-rc.1",
     "@deepseek-ai/dsh-host-apiproxy": "^0.1.1-rc.1",
     "@deepseek-ai/dsh-host-webserver": "^0.1.1-rc.1",
     "@deepseek-ai/dsh-invariants": "^0.1.1-rc.1",
     "@deepseek-ai/dsh-llm": "^0.1.1-rc.1",
     "@deepseek-ai/dsh-home-paths": "^0.1.1-rc.1",
-    "@deepseek-ai/dsh-tools": "^0.1.1-rc.1"
+    "@deepseek-ai/dsh-tools": "^0.1.1-rc.1",
+    "react": ">=18.2.0 <19"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-client-locale": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-settings": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-slots": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",
@@ -56,7 +84,7 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc -b --pretty false",
-    "build": "tsc -b --pretty false && tsdown"
+    "build": "tsc -b --pretty false && tsdown && cp src/client.js lib/client.js"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
