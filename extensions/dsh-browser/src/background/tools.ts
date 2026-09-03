@@ -510,28 +510,40 @@ function validateElementTarget(call: ToolCall, tabId: number, frames: TabFrame[]
   return undefined
 }
 
-/** Resize the browser window hosting the controlled tab via chrome.windows. */
+/** Set the controlled tab's page viewport via CDP device-metrics override. */
 async function setViewportWindow(tabId: number, args: Record<string, unknown>): Promise<ToolAnswer> {
-  const rawWidth = args.width
-  const rawHeight = args.height
-  const width = typeof rawWidth === 'number' ? rawWidth : undefined
-  const height = typeof rawHeight === 'number' ? rawHeight : undefined
-  if (width === undefined && height === undefined) {
-    return { ok: false, error: { code: 'action-failed', message: 'browser_set_viewport requires at least one of width or height (CSS pixels).' } }
+  const width = typeof args.width === 'number' ? args.width : undefined
+  const height = typeof args.height === 'number' ? args.height : undefined
+  if (width === undefined || height === undefined) {
+    return { ok: false, error: { code: 'action-failed', message: 'browser_set_viewport requires both width and height (CSS pixels).' } }
   }
-  const valid = (value: number | undefined): boolean => value === undefined || (Number.isInteger(value) && value > 0)
-  if (!valid(width) || !valid(height)) {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
     return { ok: false, error: { code: 'action-failed', message: 'width and height must be positive integers (CSS pixels).' } }
   }
   const tab = await chrome.tabs.get(tabId)
-  // Chrome ignores width/height while a window is maximized or fullscreen, so
-  // drop back to a normal (restorable) state before applying the bounds.
-  const updates: chrome.windows.UpdateInfo = { state: 'normal' }
-  if (width !== undefined) updates.width = width
-  if (height !== undefined) updates.height = height
-  const win = await chrome.windows.update(tab.windowId, updates)
-  const text = `Browser window resized to ${width === undefined ? 'unchanged width' : `${width}px`} x ${height === undefined ? 'unchanged height' : `${height}px`}. The focused window's outer bounds are now ${win.width ?? 'unknown'} x ${win.height ?? 'unknown'} px. Use browser_snapshot to see how the page reflowed.`
+  // Attach the debugger so the Emulation domain is available. If an override is
+  // already active (set by an earlier call), attach is rejected but the existing
+  // debug session still serves the command below.
+  try { await chrome.debugger.attach(tab.id, '1.3') } catch (err) {
+    if (!isDebuggerAttachedError(err)) {
+      return { ok: false, error: { code: 'action-failed', message: 'Could not attach the debugger to control the page viewport.' } }
+    }
+  }
+  // The device-metrics override drives the page's CSS viewport exactly,
+  // independent of the window's outer bounds and OS window decorations.
+  await chrome.debugger.sendCommand(tab.id, 'Emulation.setDeviceMetricsOverride', {
+    width,
+    height,
+    deviceScaleFactor: 0,
+    mobile: false,
+  })
+  const text = `Page viewport set to ${width} x ${height} CSS pixels via device-style emulation; the controlled tab now renders at exactly this viewport, independent of the browser window size (the browser may show a debug indicator). Use browser_snapshot to see how the page reflowed.`
   return { ok: true, result: { text } }
+}
+
+function isDebuggerAttachedError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return /already attached|another debugger/i.test(msg)
 }
 
 function sameApprovalBoundary(before: ApprovalPrompt, after: ApprovalPrompt): boolean {

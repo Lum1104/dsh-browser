@@ -208,7 +208,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const setViewport = (): ToolDefinition => defineTool({
     name: 'browser_set_viewport',
-    description: 'Resize the controlled browser window to a target width and/or height measured in CSS pixels (at least one of width or height is required). Use it to test how a page renders and reflows at different window/viewport sizes.',
+    description: 'Set the controlled tab\'s page viewport to a target width and height in CSS pixels via device-style emulation, so the page reflows at exactly that viewport independent of the browser window size. Use it to test how a page renders at different viewport sizes.',
     parameters: {
       width: { type: 'number', description: 'Target window width in CSS pixels.' },
       height: { type: 'number', description: 'Target window height in CSS pixels.' },
