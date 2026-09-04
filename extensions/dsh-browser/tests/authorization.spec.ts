@@ -53,6 +53,19 @@ describe('approvalPromptForCall', () => {
     expect(prompt?.summary).not.toContain('secret')
   })
 
+  it('scopes new-tab approval to its destination and redacts URL secrets', () => {
+    const prompt = approvalPromptForCall(call('browser_open_tab', {
+      url: 'https://docs.example/guide?token=secret#private',
+    }), 'auto', FRAMES, 'zh')
+
+    expect(prompt).toMatchObject({
+      origins: ['https://docs.example'],
+      canTrust: true,
+      summary: '新建标签页访问 https://docs.example/guide 并跟随操作',
+    })
+    expect(prompt?.summary).not.toContain('secret')
+  })
+
   it('does not offer trust for invalid navigation and keeps key summaries on one bounded line', () => {
     expect(approvalPromptForCall(call('browser_navigate', { url: 'javascript:alert(1)' }), 'auto', FRAMES, 'zh'))
       .toMatchObject({ canTrust: false })

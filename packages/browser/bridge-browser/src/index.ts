@@ -16,18 +16,16 @@
  * @module @yuxianglin/dsh-bridge-browser
  */
 
-import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-attachment'
+import type {} from '@deepseek-ai/dsh-api-gateway'
+import type {} from '@deepseek-ai/dsh-client-connection'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-tools'
-import type {} from '@deepseek-ai/dsh-host-apiproxy'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
-import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
-import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
-import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import { createApiCompatibility } from './api-compat.ts'
 import { BridgeServer } from './server.ts'
 import { BrowserContextInjector } from './browser-context.ts'
 import { registerBrowserTools } from './tools.ts'
@@ -46,7 +44,7 @@ import { resolveToken } from './token.ts'
 export const name = 'bridge-browser'
 
 /** Services required by this plugin. */
-export const inject = ['webServer', 'apiProxy', 'tools', 'agents']
+export const inject = ['webServer', 'connection', 'typertGateway', 'tools', 'agents']
 
 /** Default per-tool-call budget (ms). */
 const DEFAULT_TOOL_TIMEOUT_MS = 90_000
@@ -134,26 +132,24 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const tokenRes = await resolveToken(resolved.token)
   // Workspace grouping wraps the gateway create; session deferral wraps the
   // result so materialization at first prompt still flows through grouping.
-  const api: ApiProxy = withSessionDeferral(
+  const api = createApiCompatibility(ctx, current => withSessionDeferral(
     withSessionWorkspace(
-      ctx.apiProxy,
+      current,
       resolved.sessionWorkspacePath,
       message => { ctx.logger.warn(message) },
     ),
     resolved.deferSessionCreate,
     ctx.get('attachments')?.imageLimits,
-  )
+  ))
   const browserContext = new BrowserContextInjector(ctx.agents)
   ctx.on('agent/session-start', ({ agent }) => { browserContext.activate(agent) })
 
   const purgeSession = async (sessionId: string): Promise<void> => {
     const runningSessionIds = new Set<string>()
     try {
-      const listed = await api.sessions.list({ rpcId: RpcId(randomUUID()), payload: {} })
-      if (listed.result.ok) {
-        for (const entry of listed.result.value.items) {
-          if (entry.running) runningSessionIds.add(entry.sessionId)
-        }
+      const listed = await api.rpc('session.list', {}) as { items?: Array<{ sessionId: string; running: boolean }> }
+      for (const entry of listed.items ?? []) {
+        if (entry.running) runningSessionIds.add(entry.sessionId)
       }
     } catch {
       // Guard is best-effort: an unavailable listing must not block deletion,
@@ -165,8 +161,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
 
   const server = new BridgeServer({
     token: tokenRes.token,
-    apiHandler: toFetchHandler(api),
-    openEvents: (signal) => api.events.mux({ rpcId: RpcId(randomUUID()), payload: {} }, signal),
+    apiHandler: api.fetchHandler,
+    openEvents: api.openEvents,
     toolTimeoutMs: resolved.toolTimeoutMs,
     caps: {
       textOnly: true,

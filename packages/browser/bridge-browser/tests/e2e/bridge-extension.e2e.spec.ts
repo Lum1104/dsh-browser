@@ -34,12 +34,13 @@ import ToolRegistry from '@deepseek-ai/dsh-tools'
 import LlmService, { type UserMessage } from '@deepseek-ai/dsh-llm'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
-import { createApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
+import SessionProjection from '@deepseek-ai/dsh-session-projection'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import * as BridgeBrowser from '../../src/index.ts'
+import { CurrentApiHost } from '../current-api-host.ts'
 
 const BRIDGE = '@yuxianglin/dsh-bridge-browser'
 const TOKEN = 'e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0'
@@ -49,21 +50,6 @@ const SessionPersistenceStub = {
   name: 'session-persistence-stub',
   apply(ctx: Context): void {
     ctx.provide('sessionPersistence', { list: () => Promise.resolve([]) } as never)
-  },
-}
-
-/** The gateway over the minimal spine, provided as ctx.apiProxy (model routing stubbed). */
-const ApiHost = {
-  name: 'api-host',
-  // Mirrors ApiProxyService.inject for the services this composition provides;
-  // 'workspaceRegistry' is REQUIRED — the gateway's workspace domain calls
-  // the service property, which Cordis gates on the inject list.
-  inject: ['sessions', 'userQuestions', 'agents', 'workspaceRegistry'],
-  apply(ctx: Context, config: { cwd: string }): void {
-    ctx.provide('apiProxy', createApiProxy(ctx, {
-      defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
-      cwd: config.cwd,
-    }))
   },
 }
 
@@ -82,6 +68,7 @@ async function bootComposition(): Promise<{ ctx: Context; port: number; root: st
     "- name: '@deepseek-ai/dsh-tools'",
     "- name: '@deepseek-ai/dsh-llm'",
     "- name: '@deepseek-ai/dsh-agent-loop'",
+    "- name: '@deepseek-ai/dsh-session-projection'",
     "- name: '@deepseek-ai/dsh-storage'",
     "- name: '@deepseek-ai/dsh-storage-json'",
     '  config:',
@@ -114,12 +101,13 @@ async function bootComposition(): Promise<{ ctx: Context; port: number; root: st
     ['@deepseek-ai/dsh-tools', ToolRegistry],
     ['@deepseek-ai/dsh-llm', LlmService],
     ['@deepseek-ai/dsh-agent-loop', AgentLoop],
+    ['@deepseek-ai/dsh-session-projection', SessionProjection],
     ['@deepseek-ai/dsh-storage', Storage],
     ['@deepseek-ai/dsh-storage-json', StorageJson],
     ['@deepseek-ai/dsh-storage-domain', StorageDomain],
     ['test:session-persistence', SessionPersistenceStub],
     ['@deepseek-ai/dsh-workspace', WorkspaceRegistry],
-    ['test:api-host', ApiHost],
+    ['test:api-host', CurrentApiHost],
     [BRIDGE, BridgeBrowser],
   ])
   context.loader.internal = {

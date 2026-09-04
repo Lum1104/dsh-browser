@@ -88,13 +88,13 @@ export type ClientFrame =
 export type ServerFrame =
   /** Accepted after a valid `hello`. */
   | { t: 'hello.ok'; caps: BridgeCaps }
-  /** Reply to an `rpc` frame; `result` is the apiproxy ServerResponse envelope. */
+  /** Reply to an `rpc` frame; `result` is the bridge compatibility response envelope. */
   | { t: 'rpc.result'; id: string; ok: true; result: unknown }
   | { t: 'rpc.result'; id: string; ok: false; error: { code: string; message: string } }
   /** Receipt for a `respond` frame (normally `{ accepted: boolean }`). */
   | { t: 'respond.result'; id: string; ok: true; result: unknown }
   | { t: 'respond.result'; id: string; ok: false; error: { code: string; message: string } }
-  /** One gateway event envelope (the same server-request shape the GUI's /api/events.mux carries). */
+  /** One compatibility event envelope projected from current Remote and Session events. */
   | { t: 'event'; frame: { rpcId: string; method: string; payload: unknown } }
   /** A model-requested browser action to execute in the user-controlled tab. */
   | { t: 'tool.call'; id: string; name: string; args: Record<string, unknown>; expiresAt: number; sessionId?: string }

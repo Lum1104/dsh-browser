@@ -41,7 +41,13 @@ import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts
 import { BRIDGE_CONFIG_PATH, BRIDGE_PATH } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { BridgeClient, type BridgeState } from './bridge.ts'
 import { createRpc } from './rpc.ts'
-import { dispatchToolCall, resetTabSnapshot, type ToolAnswer, type ToolCall } from './tools.ts'
+import {
+  dispatchToolCall,
+  isTabManagementTool,
+  resetTabSnapshot,
+  type ToolAnswer,
+  type ToolCall,
+} from './tools.ts'
 import {
   isApprovalDecision,
   type ApprovalAuthorization,
@@ -76,6 +82,8 @@ export interface Settings {
   bridgeUrl: string
   token: string
   sharePageContent: 'ask' | 'auto' | 'off'
+  /** Allow all page reads, state changes, and tab management without prompts. */
+  unrestrictedBrowserAccess: boolean
   /** Origins whose state-changing actions may run without another prompt. */
   trustedActionOrigins: string[]
   /** Show an OS notification when no side panel can display an approval. */
@@ -89,6 +97,7 @@ const SETTINGS_DEFAULTS: Settings = {
   bridgeUrl: '',
   token: '',
   sharePageContent: 'auto',
+  unrestrictedBrowserAccess: false,
   trustedActionOrigins: [],
   approvalNotifications: true,
   autoResumeSession: true,
@@ -240,6 +249,7 @@ function normalizeSettings(candidate: Settings): Settings {
   return {
     ...candidate,
     sharePageContent,
+    unrestrictedBrowserAccess: candidate.unrestrictedBrowserAccess === true,
     trustedActionOrigins: trusted,
     approvalNotifications: candidate.approvalNotifications !== false,
     autoResumeSession: candidate.autoResumeSession !== false,
@@ -324,7 +334,7 @@ function resetSelectionDedupe(sources: readonly SelectionSource[]): void {
 function selectionSharingEnabled(): boolean {
   // Until storage answers, `settings` still holds the defaults. Reporting the
   // default here would arm watchers for a user whose saved choice is `off`.
-  return settingsLoaded && settings.sharePageContent !== 'off'
+  return settingsLoaded && (settings.unrestrictedBrowserAccess || settings.sharePageContent !== 'off')
 }
 
 /** Page selections are captured only in a window with an open panel. */
@@ -711,6 +721,7 @@ async function authorizeToolCall(
   sessionId?: string,
 ): Promise<ApprovalAuthorization> {
   if (signal.aborted) return 'cancelled'
+  if (settings.unrestrictedBrowserAccess) return 'approved'
   if (actionCoveredByTrustedOrigins(
     prompt,
     sessionTrustedActionOrigins,
@@ -753,7 +764,7 @@ async function refreshFollowedPage(sessionId: string, tabId: number): Promise<vo
       : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars }
     const answer = await dispatchToolCall(
       { id: crypto.randomUUID(), name: 'browser_snapshot', args: {} },
-      settings.sharePageContent,
+      settings.unrestrictedBrowserAccess ? 'auto' : settings.sharePageContent,
       budget,
       (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, sessionId),
       controller.signal,
@@ -810,6 +821,11 @@ async function rebindTabAffinityToActive(signal: AbortSignal, sessionId?: string
       : 'The current tab could not be determined; the existing session and tab binding were left unchanged')
   }
 
+  commitTabAffinityRebind(summary, sessionId)
+}
+
+/** Commit one explicit tab handoff and clear element references from the previous target. */
+function commitTabAffinityRebind(summary: AffinityTab, sessionId?: string): void {
   const previousControlledTabId = tabAffinity.snapshot().controlled?.tabId
   if (sessionId !== undefined) {
     activeFollowRefreshes.get(sessionId)?.abort()
@@ -857,17 +873,48 @@ function routeToolCall(call: ToolCall): void {
   const budget = caps === null
     ? undefined
     : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars }
-  void resolveToolTab(call.sessionId).then((target) => 'ok' in target
-    ? target
-    : dispatchToolCall(
+  const followTab = (tab: chrome.tabs.Tab): void => {
+    const summary = summarizeTab(tab)
+    if (summary === null) throw new Error('the selected tab has no usable identifier')
+    commitTabAffinityRebind(summary, call.sessionId)
+  }
+  const dispatch = (
+    target?: Pick<chrome.tabs.Tab, 'id' | 'url'> & { windowId?: number },
+    targetStillAllowed?: () => boolean,
+  ): Promise<ToolAnswer> => {
+    const controlledTabId = call.sessionId === undefined
+      ? tabAffinity.snapshot().controlled?.tabId
+      : tabAffinity.getSessionTab(call.sessionId)?.tabId
+    return dispatchToolCall(
         call,
-        settings.sharePageContent,
+        settings.unrestrictedBrowserAccess ? 'auto' : settings.sharePageContent,
         budget,
-        (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId),
+        (prompt) => authorizeToolCall(
+          prompt,
+          controller.signal,
+          target?.windowId ?? tabAffinity.snapshot().active?.windowId ?? tabAffinity.snapshot().controlled?.windowId ?? 0,
+          call.sessionId,
+        ),
         controller.signal,
         target,
-        () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
-      )).then(
+        targetStillAllowed,
+        followTab,
+        {
+          unrestrictedAccess: settings.unrestrictedBrowserAccess,
+          ...(controlledTabId === undefined ? {} : { controlledTabId }),
+          followTab,
+        },
+      )
+  }
+  const answer = isTabManagementTool(call.name)
+    ? affinityReady.then(() => dispatch())
+    : resolveToolTab(call.sessionId).then((target) => 'ok' in target
+        ? target
+        : dispatch(
+            target,
+            () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
+          ))
+  void answer.then(
     (answer) => {
       if (controller.signal.aborted) {
         if (activeToolCalls.get(call.id) === controller) {

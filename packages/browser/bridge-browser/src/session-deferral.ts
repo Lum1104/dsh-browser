@@ -13,21 +13,18 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
-import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { ImageAttachmentLimits } from '@deepseek-ai/dsh-attachment'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { LegacyRpc } from './legacy-rpc.ts'
 
 /** Provisional entries older than this are dropped on the next create. */
 const PROVISIONAL_TTL_MS = 30 * 60_000
 
-type CreateRequest = Parameters<ApiProxy['sessions']['create']>[0]
-type HistoryRequest = Parameters<ApiProxy['sessions']['history']>[0]
-type PromptRequest = Parameters<ApiProxy['sessions']['prompt']>[0]
+type CreatePayload = Record<string, unknown> & { sessionId?: SessionId }
 
 interface ProvisionalEntry {
   /** The original create payload, replayed at materialization (keeps cwd/workspaceId). */
-  payload: CreateRequest['payload']
+  payload: CreatePayload
   createdAt: number
 }
 
@@ -43,14 +40,14 @@ interface ProvisionalEntry {
  * @returns the original API when disabled, otherwise the wrapped API.
  */
 export function withSessionDeferral(
-  api: ApiProxy,
+  api: LegacyRpc,
   enabled: boolean,
   imageLimits?: ImageAttachmentLimits,
-): ApiProxy {
+): LegacyRpc {
   if (!enabled) return api
 
   const provisional = new Map<SessionId, ProvisionalEntry>()
-  const materializing = new Map<SessionId, ReturnType<ApiProxy['sessions']['create']>>()
+  const materializing = new Map<SessionId, Promise<unknown>>()
 
   const prune = (): void => {
     const cutoff = Date.now() - PROVISIONAL_TTL_MS
@@ -59,60 +56,53 @@ export function withSessionDeferral(
     }
   }
 
-  const mintedId = (payload: CreateRequest['payload']): SessionId =>
+  const mintedId = (payload: CreatePayload): SessionId =>
     payload.sessionId ?? `session-${randomUUID()}` as SessionId
 
-  return {
-    ...api,
-    sessions: {
-      ...api.sessions,
-      async create(request: CreateRequest) {
+  return async (method, payload, signal) => {
+    const request = asPayload(payload)
+    switch (method) {
+      case 'session.create': {
         prune()
-        const sessionId = mintedId(request.payload)
-        provisional.set(sessionId, { payload: { ...request.payload }, createdAt: Date.now() })
-        return { rpcId: request.rpcId, result: { ok: true, value: { sessionId } } }
-      },
-      async history(request: HistoryRequest) {
-        if (!provisional.has(request.payload.sessionId)) return api.sessions.history(request)
+        const sessionId = mintedId(request)
+        provisional.set(sessionId, { payload: { ...request }, createdAt: Date.now() })
+        return { sessionId }
+      }
+      case 'session.history': {
+        if (!provisional.has(request.sessionId as SessionId)) return api(method, payload, signal)
         return {
-          rpcId: request.rpcId,
-          result: {
-            ok: true,
-            value: {
-              events: [],
-              hasMore: false,
-              ...(imageLimits === undefined
-                ? {}
-                : { projections: { asOfSeq: -1, values: { imageLimits } } }),
-            },
-          },
+          events: [],
+          hasMore: false,
+          ...(imageLimits === undefined
+            ? {}
+            : { projections: { asOfSeq: -1, values: { imageLimits } } }),
         }
-      },
-      async prompt(request: PromptRequest) {
-        const entry = provisional.get(request.payload.sessionId)
-        if (entry === undefined) return api.sessions.prompt(request)
-        const existing = materializing.get(request.payload.sessionId)
-        const pending = existing ?? api.sessions.create({
-          rpcId: RpcId(randomUUID()),
-          payload: { ...entry.payload, sessionId: request.payload.sessionId },
-        })
+      }
+      case 'session.prompt': {
+        const sessionId = request.sessionId as SessionId
+        const entry = provisional.get(sessionId)
+        if (entry === undefined) return api(method, payload, signal)
+        const existing = materializing.get(sessionId)
+        const pending = existing ?? api('session.create', { ...entry.payload, sessionId }, signal)
         if (existing === undefined) {
-          materializing.set(request.payload.sessionId, pending)
+          materializing.set(sessionId, pending)
           void pending.then(
-            () => { materializing.delete(request.payload.sessionId) },
-            () => { materializing.delete(request.payload.sessionId) },
+            () => { materializing.delete(sessionId) },
+            () => { materializing.delete(sessionId) },
           )
         }
-        const created = await pending
-        if (!created.result.ok) {
-          // The create failure value shape differs from prompt's success
-          // shape; the carrier relays only result.ok/error, so the value
-          // side is irrelevant here.
-          return created as unknown as Awaited<ReturnType<ApiProxy['sessions']['prompt']>>
-        }
-        provisional.delete(request.payload.sessionId)
-        return api.sessions.prompt(request)
-      },
-    },
+        await pending
+        provisional.delete(sessionId)
+        return api(method, payload, signal)
+      }
+      default:
+        return api(method, payload, signal)
+    }
   }
+}
+
+function asPayload(payload: unknown): CreatePayload {
+  return typeof payload === 'object' && payload !== null && !Array.isArray(payload)
+    ? payload as CreatePayload
+    : {}
 }

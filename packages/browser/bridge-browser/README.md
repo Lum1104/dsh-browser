@@ -2,9 +2,9 @@
 
 English | [中文](README.zh.md)
 
-The **browser-operation bridge** for dsh: mounts a token-authenticated WebSocket carrier (`/ext/bridge`) that the Chrome extension connects to, proxies gateway RPCs through the same fetch handler the `/api` surface uses, pumps session events per connection, and registers the text-only `browser_*` tool set that reads and operates the user's active tab through the extension — click elements, fill forms, scroll, and navigate in the real browser, login state preserved. The side panel is the conversation entry; the tools are the product.
+The **browser-operation bridge** for dsh: mounts a token-authenticated WebSocket carrier (`/ext/bridge`) that the Chrome extension connects to, translates its dotted RPC protocol onto the current Connection and Typert Gateway services, pumps session and Remote events per connection, and registers the text-only `browser_*` tool set that reads and operates the user's active tab through the extension — click elements, fill forms, scroll, and navigate in the real browser, login state preserved. The side panel is the conversation entry; the tools are the product.
 
-**Text-only browser tools, multimodal chat passthrough**: page snapshots stay structured text (title, main content, numbered interactive inventory, and masked form fields), and every browser action uses stable inventory numbers. The generic RPC carrier also passes dsh 0.1.1 image prompts and durable attachment reads; deferred new sessions expose image limits only when the host actually mounts the attachment service.
+**Text-only browser tools, multimodal chat passthrough**: page snapshots stay structured text (title, main content, numbered interactive inventory, and masked form fields), and every browser action uses stable inventory numbers. The compatibility carrier also passes current dsh image prompts and durable attachment reads; deferred new sessions expose image limits only when the host actually mounts the attachment service.
 
 ## Config
 
@@ -24,14 +24,14 @@ Workspace grouping is best-effort. If the composition has no workspace domain, d
 The remote installer downloads an installer-managed workspace, builds the plugin, and registers its official bundle in the local dsh `web` profile. It requires neither Git nor a local clone:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ChangeYourWay/dsh-browser/refs/heads/main/scripts/install.sh | bash
 cd ~/.dsh/dsh-browser && pnpm start
 ```
 
 On Windows, run the PowerShell installer instead:
 
 ```powershell
-$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/ChangeYourWay/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 cd $HOME\.dsh\dsh-browser; pnpm start
 ```
 
@@ -58,7 +58,7 @@ The installer copies the unpacked extension to `~/.dsh/browser-extension` and op
 Frames are JSON objects discriminated by `t`, defined in [`protocol.ts`](src/protocol.ts) — the single source of truth shared with the extension through the workspace package's `./src/*` export. The built package also publishes `@yuxianglin/dsh-bridge-browser/protocol` for external consumers.
 
 - Client → server: `hello` (auth + caps), `rpc` (gateway method passthrough), `respond` (resolve a host interaction by its RPC id), `tool.result`, `pong`.
-- Server → client: `hello.ok` (echoes negotiated caps), `rpc.result`, `respond.result` (correlated acceptance or error), `event` (gateway event envelope, same shape as `/api/events.mux`), `tool.call`, `ping`, `error`.
+- Server → client: `hello.ok` (echoes negotiated caps), `rpc.result`, `respond.result` (correlated acceptance or error), `event` (compatibility envelope projected from current Remote and Session events), `tool.call`, `ping`, `error`.
 
 Each `respond` carries a globally unique transport id as well as the host interaction's `rpcId`. The extension routes its receipt only to the panel that initiated it and rejects pending responses on timeout, panel closure, or bridge disconnection.
 
@@ -69,6 +69,8 @@ Each `respond` carries a globally unique transport id as well as the host intera
 | `browser_snapshot` | Structured text snapshot (title/URL/main/inventory/forms); `delta: true` returns only changes. |
 | `browser_click` / `browser_type` / `browser_press` | Operate inventory items by stable index. |
 | `browser_scroll` / `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | Page movement. |
+| `browser_open_tab` | Open an HTTP(S) URL in a new foreground tab and follow it for later tools. |
+| `browser_list_tabs` / `browser_follow_tab` / `browser_close_tab` | Inspect, select, and close open browser tabs by stable tab ID. |
 | `browser_get_text` / `browser_wait` | Read regions / settle detection. |
 
 ## Model Experience

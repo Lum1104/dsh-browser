@@ -1,10 +1,9 @@
 /**
  * REAL-composition coverage: a test-only cordis.yml booted through the
  * published Loader mounts the webserver, the minimal spine (sessions /
- * user-questions / agents / system-prompt / tools), a test-only api host
- * providing `ctx.apiProxy` over `createApiProxy` (the same shape the apiproxy
- * package's own tests use), and the bridge plugin itself. A real WebSocket
- * client then authenticates over a real socket and drives real gateway RPCs
+ * user-questions / agents / system-prompt / tools), a test-only current API
+ * host providing Connection and Typert Gateway services, and the bridge plugin
+ * itself. A real WebSocket client authenticates and drives compatibility RPCs
  * against the real session store; disposal removes the tool registrations
  * (HMR safety).
  *
@@ -29,9 +28,10 @@ import ToolRegistry from '@deepseek-ai/dsh-tools'
 import LlmService from '@deepseek-ai/dsh-llm'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
-import { createApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
+import SessionProjection from '@deepseek-ai/dsh-session-projection'
 import * as BridgeBrowser from '../src/index.ts'
 import { BRIDGE_PATH, type BridgeFrame } from '../src/protocol.ts'
+import { CurrentApiHost } from './current-api-host.ts'
 
 const BRIDGE = '@yuxianglin/dsh-bridge-browser'
 const TOKEN = 'abcdabcdabcdabcdabcdabcdabcdabcd'
@@ -45,23 +45,6 @@ afterEach(async () => {
   if (root !== undefined) await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
   root = undefined
 })
-
-/**
- * The gateway over the minimal spine, provided as `ctx.apiProxy` — the same
- * factory the apiproxy package's own tests use. Model routing is stubbed
- * (provider/model names only; no adapter), which is the one external
- * boundary this composition does not exercise.
- */
-const ApiHost = {
-  name: 'api-host',
-  inject: ['sessions', 'userQuestions', 'agents'],
-  apply(ctx: Context, config: { cwd: string }): void {
-    ctx.provide('apiProxy', createApiProxy(ctx, {
-      defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
-      cwd: config.cwd,
-    }))
-  },
-}
 
 /** Write a dist fixture and the composition cordis.yml, then boot it through the real Loader. */
 async function loadComposition(): Promise<{ ctx: Context; configPath: string; port: number }> {
@@ -79,6 +62,7 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
     "- name: '@deepseek-ai/dsh-tools'",
     "- name: '@deepseek-ai/dsh-llm'",
     "- name: '@deepseek-ai/dsh-agent-loop'",
+    "- name: '@deepseek-ai/dsh-session-projection'",
     "- name: 'test:api-host'",
     '  config:',
     `    cwd: '${root}'`,
@@ -105,7 +89,8 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
     ['@deepseek-ai/dsh-tools', ToolRegistry],
     ['@deepseek-ai/dsh-llm', LlmService],
     ['@deepseek-ai/dsh-agent-loop', AgentLoop],
-    ['test:api-host', ApiHost],
+    ['@deepseek-ai/dsh-session-projection', SessionProjection],
+    ['test:api-host', CurrentApiHost],
     [BRIDGE, BridgeBrowser],
   ])
   context.loader.internal = {

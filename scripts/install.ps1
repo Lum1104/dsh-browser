@@ -23,7 +23,7 @@ $ProgressPreference = 'SilentlyContinue'
 # message into question marks on a non-Chinese install.
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
 
-$Repository = 'Lum1104/dsh-browser'
+$Repository = 'ChangeYourWay/dsh-browser'
 $RemoteRef = 'main'
 $DshHomeDir = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME '.dsh' }
 $ManagedRoot = Join-Path $DshHomeDir 'dsh-browser'
@@ -381,7 +381,9 @@ if (-not $Root) { Install-RemoteWorkspace }
 
 $Ext = Join-Path $Root 'extensions\dsh-browser'
 $Plugin = Join-Path $Root 'packages\browser\bridge-browser'
+$WebProfileDir = Join-Path $DshHomeDir 'profiles\web'
 $WebProfileManifest = Join-Path $DshHomeDir 'profiles\web\package.json'
+$DshCli = Join-Path $Root 'node_modules\@deepseek-ai\dsh\lib\bin.js'
 
 Assert-Command 'pnpm' "未找到 pnpm；请先启用 Corepack 或安装 pnpm。" "pnpm was not found; enable Corepack or install pnpm first."
 Assert-Command 'node' "未找到 Node.js；请先安装受支持的 Node.js 版本。" "Node.js was not found; install a supported Node.js version first."
@@ -393,17 +395,58 @@ Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', $B
   -FailZh "桥插件构建失败。" -FailEn "The bridge plugin build failed."
 
 Write-Step 2 "注册到本机 web profile" "Register with the local web profile"
+# Initialize the profile without a package argument. Package installation then
+# runs directly inside the profile, avoiding dsh's Windows cmd.exe forwarding
+# for the one argument that may contain a checkout path with spaces.
+if (-not (Test-Path -LiteralPath $WebProfileManifest -PathType Leaf)) {
+  Invoke-Quiet -WorkingDirectory $Root -Command 'node' `
+    -Arguments @($DshCli, 'plugin', '--profile', 'web', 'install') `
+    -FailZh "初始化 web profile 失败。" -FailEn "Initializing the web profile failed."
+}
+
 if (Test-ProfileDependency -Manifest $WebProfileManifest -PackageName $LegacyPlugin) {
-  Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' `
-    -Arguments @('exec', 'dsh', 'plugin', '--profile', 'web', 'remove', $LegacyPlugin) `
+  Invoke-Quiet -WorkingDirectory $WebProfileDir -Command 'pnpm' `
+    -Arguments @('remove', '-w', $LegacyPlugin) `
     -FailZh "移除旧插件失败。" -FailEn "Removing the legacy plugin failed."
 }
-# pnpm accepts forward slashes on Windows, and they keep the backslashes in a Windows path
-# from being read as escapes inside the link: specifier.
-$LinkTarget = $Plugin.Replace('\', '/')
-Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' `
-  -Arguments @('exec', 'dsh', 'plugin', '--profile', 'web', 'add', '-w', "$BridgePlugin@link:$LinkTarget") `
+
+# Keep a stable profile-local junction to the selected source checkout. pnpm
+# receives only `link:./.dsh-browser-source`, so Windows PowerShell 5.1 and 7
+# behave identically even when either absolute path contains spaces.
+$ProfileSourceLink = Join-Path $WebProfileDir '.dsh-browser-source'
+if (Test-Path -LiteralPath $ProfileSourceLink) {
+  $sourceItem = Get-Item -LiteralPath $ProfileSourceLink -Force
+  if (-not ($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+    Stop-Install `
+      "$ProfileSourceLink 已存在且不是目录联接；请移动该路径后重试。" `
+      "$ProfileSourceLink exists and is not a directory junction; move it and retry."
+  }
+  $existingTarget = [System.IO.Path]::GetFullPath([string]$sourceItem.Target)
+  $desiredTarget = (Resolve-Path -LiteralPath $Plugin).ProviderPath
+  if ($existingTarget -ne $desiredTarget) {
+    Remove-Item -LiteralPath $ProfileSourceLink -Force
+    New-Item -ItemType Junction -Path $ProfileSourceLink -Target $desiredTarget | Out-Null
+  }
+} else {
+  New-Item -ItemType Junction -Path $ProfileSourceLink -Target $Plugin | Out-Null
+}
+
+Invoke-Quiet -WorkingDirectory $WebProfileDir -Command 'pnpm' `
+  -Arguments @('add', '-w', 'link:./.dsh-browser-source') `
   -FailZh "注册桥插件失败。" -FailEn "Registering the bridge plugin failed."
+
+# `dsh plugin` normally reconciles package metadata into this bundle roster.
+# The direct pnpm call above deliberately bypasses that Windows-only forwarding
+# path, so perform the small deterministic reconciliation here.
+$profileManifest = Get-Content -LiteralPath $WebProfileManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+$bundles = @($profileManifest.dsh.profile.bundles) | Where-Object { $_ -ne $LegacyPlugin }
+if ($bundles -notcontains $BridgePlugin) { $bundles += $BridgePlugin }
+$profileManifest.dsh.profile.bundles = $bundles
+$profileJson = ($profileManifest | ConvertTo-Json -Depth 20) + "`n"
+[System.IO.File]::WriteAllText(
+  $WebProfileManifest,
+  $profileJson,
+  (New-Object System.Text.UTF8Encoding $false))
 
 Write-Step 3 "构建 Chrome 扩展" "Build the Chrome extension"
 Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', 'dsh-browser-extension', 'run', 'build') `
@@ -475,6 +518,6 @@ Write-Pair "• 扩展会自动发现本机 dsh，无需填写地址或 token" "
 $QuotedRoot = "'" + $Root.Replace("'", "''") + "'"
 Write-Host ("• 启动固定版本：cd {0}; pnpm start" -f $QuotedRoot)
 Write-Host ("   Start the pinned version: cd {0}; pnpm start" -f $QuotedRoot)
-Write-Pair "• 或启动 npm 最新版本：npx @deepseek-ai/dsh web" "Or start the latest npm version: npx @deepseek-ai/dsh web"
+Write-Pair "• 或直接启动固定 npm 版本：npx @deepseek-ai/dsh@0.1.2-rc.1 web" "Or start the pinned npm version directly: npx @deepseek-ai/dsh@0.1.2-rc.1 web"
 Write-Host ''
-Write-Pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/Lum1104/dsh-browser" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/Lum1104/dsh-browser"
+Write-Pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/ChangeYourWay/dsh-browser" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/ChangeYourWay/dsh-browser"

@@ -18,9 +18,10 @@ import {
   type TabFrame,
 } from './frames.ts'
 import { wrapUntrustedContent } from '../security/untrusted.ts'
-import { approvalPromptForCall } from './authorization.ts'
+import { approvalPromptForCall, originFromUrl } from './authorization.ts'
 import { waitForNextDocumentReady } from './navigation.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
+import { getUiLocale } from '../i18n.ts'
 
 /** A tool call from the bridge. */
 export interface ToolCall {
@@ -62,6 +63,20 @@ const NAVIGATION_CANDIDATE_TOOLS = new Set([
   'browser_forward',
   'browser_reload',
 ])
+const TAB_NATIVE_TOOLS = new Set([
+  'browser_snapshot',
+  'browser_navigate',
+  'browser_open_tab',
+  'browser_back',
+  'browser_forward',
+  'browser_reload',
+])
+/** Tools that operate on the browser tab collection rather than one page document. */
+export const TAB_MANAGEMENT_TOOL_NAMES = new Set([
+  'browser_list_tabs',
+  'browser_follow_tab',
+  'browser_close_tab',
+])
 const NAVIGATION_SNAPSHOT_GUIDANCE = 'Navigation completed and the current page snapshot is included below. Use it directly instead of taking an immediate duplicate snapshot.'
 const pendingInjections = new Map<number, Promise<void>>()
 const snapshotDocumentsByTab = new Map<number, Map<number, string>>()
@@ -69,6 +84,21 @@ const snapshotDocumentsByTab = new Map<number, Map<number, string>>()
 /** Forget delta/element state whenever the user explicitly follows a new tab. */
 export function resetTabSnapshot(tabId: number): void {
   snapshotDocumentsByTab.delete(tabId)
+}
+
+/** Whether a tool can run without first resolving the current controlled tab. */
+export function isTabManagementTool(name: string): boolean {
+  return TAB_MANAGEMENT_TOOL_NAMES.has(name)
+}
+
+/** Tab-affinity services owned by the background entry point. */
+export interface TabManagementContext {
+  /** Skip all browser approval prompts after the user enables unrestricted access. */
+  unrestrictedAccess: boolean
+  /** Controlled tab for the calling session, when one still exists. */
+  controlledTabId?: number
+  /** Rebind subsequent tools to one existing tab without activating it. */
+  followTab?: (tab: chrome.tabs.Tab) => void | Promise<void>
 }
 
 function isToolAnswer(value: unknown): value is ToolAnswer {
@@ -116,6 +146,115 @@ async function sendAction(
 
 function unavailable(message: string): ToolAnswer {
   return { ok: false, error: { code: 'content-unavailable', message } }
+}
+
+function tabMetadataSnapshot(url: string | undefined, maxChars: number): ToolAnswer {
+  const status = 'The current tab is available only through browser-level controls because its page DOM is protected or inaccessible. DOM snapshot, click, type, press, scroll, wait, and text extraction are unavailable here. Navigate, open a new tab, back, forward, and reload remain available.'
+  const separator = '\n\n'
+  const remaining = maxChars - status.length - separator.length
+  if (remaining <= 0) return { ok: true, result: { text: status.slice(0, maxChars) } }
+  return {
+    ok: true,
+    result: {
+      text: `${status}${separator}${wrapUntrustedContent(`URL: ${url ?? '(unknown)'}`, remaining)}`,
+    },
+  }
+}
+
+function requestedHttpUrl(args: Record<string, unknown>): { url: URL } | { error: ToolAnswer } {
+  const value = typeof args.url === 'string' ? args.url : ''
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return { error: { ok: false, error: { code: 'action-failed', message: `url is not valid: ${value}` } } }
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return { error: { ok: false, error: { code: 'action-failed', message: `Only http and https URLs are supported; received ${url.protocol}.` } } }
+  }
+  return { url }
+}
+
+async function dispatchTabNativeTool(
+  tabId: number,
+  tabUrl: string | undefined,
+  windowId: number | undefined,
+  call: ToolCall,
+  budget: ContentBudget,
+  signal?: AbortSignal,
+  targetStillAllowed?: () => boolean,
+  followCreatedTab?: (tab: chrome.tabs.Tab) => void | Promise<void>,
+): Promise<ToolAnswer | undefined> {
+  if (call.name === 'browser_snapshot') return tabMetadataSnapshot(tabUrl, budget.maxChars)
+  if (!TAB_NATIVE_TOOLS.has(call.name)) return undefined
+  if (isCancelled(call, signal)) return cancelled()
+  if (targetStillAllowed?.() === false) return targetChanged()
+
+  if (call.name === 'browser_open_tab') {
+    const requested = requestedHttpUrl(call.args)
+    if ('error' in requested) return requested.error
+    let created: chrome.tabs.Tab
+    try {
+      created = await chrome.tabs.create({
+        url: requested.url.href,
+        active: true,
+        ...windowId === undefined ? {} : { windowId },
+      })
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error)
+      return unavailable(`The new tab could not be opened: ${detail}`)
+    }
+    if (created.id === undefined) return unavailable('The new tab opened without a usable tab identifier and could not be followed.')
+    try {
+      await followCreatedTab?.(created)
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error)
+      return unavailable(`The new tab opened but could not become the controlled tab: ${detail}`)
+    }
+    return {
+      ok: true,
+      result: {
+        text: `Opened ${requested.url.href} in a new tab and made it the controlled tab. Call browser_snapshot after the page loads.`,
+        navigationPending: true,
+      },
+    }
+  }
+
+  let operation: Promise<unknown>
+  let text: string
+  try {
+    switch (call.name) {
+      case 'browser_navigate': {
+        const requested = requestedHttpUrl(call.args)
+        if ('error' in requested) return requested.error
+        operation = chrome.tabs.update(tabId, { url: requested.url.href })
+        text = `Navigating to ${requested.url.href}. Call browser_snapshot again after the page loads.`
+        break
+      }
+      case 'browser_back':
+        operation = chrome.tabs.goBack(tabId)
+        text = 'Navigating through browser history. Call browser_snapshot again after the page loads.'
+        break
+      case 'browser_forward':
+        operation = chrome.tabs.goForward(tabId)
+        text = 'Navigating through browser history. Call browser_snapshot again after the page loads.'
+        break
+      case 'browser_reload':
+        operation = chrome.tabs.reload(tabId)
+        text = 'The page is reloading. Call browser_snapshot again after it loads.'
+        break
+      default:
+        return undefined
+    }
+    resetTabSnapshot(tabId)
+    await operation
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return unavailable(`The browser-level operation failed: ${detail}`)
+  }
+  if (isCancelled(call, signal)) return cancelled()
+  if (targetStillAllowed?.() === false) return targetChanged()
+  return { ok: true, result: { text, navigationPending: true } }
 }
 
 function cancelled(): ToolAnswer {
@@ -371,6 +510,149 @@ async function dispatchOnce(
   }
 }
 
+function requestedTabId(args: Record<string, unknown>): number | undefined {
+  const value = args.tabId
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
+}
+
+function tabUrl(tab: chrome.tabs.Tab): string {
+  return tab.url ?? tab.pendingUrl ?? ''
+}
+
+function approvalDisplayUrl(value: string): string {
+  try {
+    const url = new URL(value)
+    const display = url.protocol === 'http:' || url.protocol === 'https:'
+      ? `${url.origin}${url.pathname}`
+      : `${url.protocol}//${url.host}${url.pathname}`
+    return display.replace(/\s+/g, ' ').slice(0, 160)
+  } catch {
+    return '(unknown URL)'
+  }
+}
+
+function tabManagementApproval(call: ToolCall, tab?: chrome.tabs.Tab): ApprovalPrompt {
+  const locale = getUiLocale()
+  if (call.name === 'browser_list_tabs') {
+    return {
+      kind: 'read',
+      action: call.name,
+      summary: locale === 'zh' ? '读取所有已打开标签页的标题和链接' : 'Read the titles and URLs of all open tabs',
+      origins: [],
+      canTrust: false,
+    }
+  }
+  const url = tab === undefined ? '' : tabUrl(tab)
+  const origin = originFromUrl(url)
+  const display = approvalDisplayUrl(url)
+  return {
+    kind: 'action',
+    action: call.name,
+    summary: call.name === 'browser_follow_tab'
+      ? (locale === 'zh' ? `跟随标签页 ${tab?.id ?? '?'}：${display}` : `Follow tab ${tab?.id ?? '?'}: ${display}`)
+      : (locale === 'zh' ? `关闭标签页 ${tab?.id ?? '?'}：${display}` : `Close tab ${tab?.id ?? '?'}: ${display}`),
+    origins: origin === undefined ? [] : [origin],
+    // Per-origin trust for page actions must not implicitly authorize tab
+    // lifecycle changes. Only the explicit unrestricted setting bypasses them.
+    canTrust: false,
+  }
+}
+
+async function authorizeTabManagement(
+  prompt: ApprovalPrompt,
+  unrestrictedAccess: boolean,
+  authorize: ((prompt: ApprovalPrompt) => Promise<ApprovalAuthorization>) | undefined,
+  call: ToolCall,
+  signal: AbortSignal | undefined,
+): Promise<ToolAnswer | undefined> {
+  if (unrestrictedAccess) return undefined
+  const authorization = authorize === undefined ? 'unavailable' : await authorize(prompt)
+  if (isCancelled(call, signal)) return cancelled()
+  return authorization === 'approved' ? undefined : approvalFailure(prompt, authorization)
+}
+
+async function findTab(tabId: number): Promise<chrome.tabs.Tab | undefined> {
+  try {
+    return await chrome.tabs.get(tabId)
+  } catch {
+    return undefined
+  }
+}
+
+async function dispatchTabManagementTool(
+  call: ToolCall,
+  budget: ContentBudget,
+  authorize: ((prompt: ApprovalPrompt) => Promise<ApprovalAuthorization>) | undefined,
+  signal: AbortSignal | undefined,
+  context: TabManagementContext,
+): Promise<ToolAnswer> {
+  if (call.name === 'browser_list_tabs') {
+    const approval = tabManagementApproval(call)
+    const rejected = await authorizeTabManagement(approval, context.unrestrictedAccess, authorize, call, signal)
+    if (rejected !== undefined) return rejected
+    const tabs = await chrome.tabs.query({})
+    if (isCancelled(call, signal)) return cancelled()
+    const records = tabs
+      .filter((tab): tab is chrome.tabs.Tab & { id: number } => tab.id !== undefined)
+      .sort((left, right) => left.windowId - right.windowId || left.index - right.index)
+      .map((tab) => ({
+        tabId: tab.id,
+        windowId: tab.windowId,
+        index: tab.index,
+        active: tab.active,
+        controlled: tab.id === context.controlledTabId,
+        title: tab.title ?? '',
+        url: tabUrl(tab),
+      }))
+    return {
+      ok: true,
+      result: { text: wrapUntrustedContent(JSON.stringify({ tabs: records }, null, 2), budget.maxChars) },
+    }
+  }
+
+  const tabId = requestedTabId(call.args)
+  if (tabId === undefined) {
+    return { ok: false, error: { code: 'action-failed', message: 'tabId must be a non-negative safe integer returned by browser_list_tabs.' } }
+  }
+  const before = await findTab(tabId)
+  if (before === undefined) return unavailable(`Tab ${tabId} is no longer open. Call browser_list_tabs again.`)
+  const approval = tabManagementApproval(call, before)
+  const rejected = await authorizeTabManagement(approval, context.unrestrictedAccess, authorize, call, signal)
+  if (rejected !== undefined) return rejected
+  const current = await findTab(tabId)
+  if (current === undefined) return unavailable(`Tab ${tabId} closed while approval was pending. Call browser_list_tabs again.`)
+  if (tabUrl(current) !== tabUrl(before)) {
+    return unavailable(`Tab ${tabId} navigated while approval was pending. Call browser_list_tabs again before retrying.`)
+  }
+  if (isCancelled(call, signal)) return cancelled()
+
+  if (call.name === 'browser_follow_tab') {
+    if (context.followTab === undefined) return unavailable('The browser could not bind the selected tab in this session.')
+    await context.followTab(current)
+    return {
+      ok: true,
+      result: { text: `Tab ${tabId} is now the controlled tab. Call browser_snapshot before operating its page.` },
+    }
+  }
+  if (call.name === 'browser_close_tab') {
+    try {
+      await chrome.tabs.remove(tabId)
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error)
+      return unavailable(`Tab ${tabId} could not be closed: ${detail}`)
+    }
+    return {
+      ok: true,
+      result: {
+        text: tabId === context.controlledTabId
+          ? `Closed controlled tab ${tabId}. Call browser_list_tabs and browser_follow_tab before the next page operation.`
+          : `Closed tab ${tabId}.`,
+      },
+    }
+  }
+  return unavailable(`Unsupported tab-management tool: ${call.name}`)
+}
+
 /**
  * Dispatch one tool call to the selected tab's content script.
  * @param call - the tool call to execute.
@@ -380,6 +662,8 @@ async function dispatchOnce(
  * @param signal - bridge lifetime; cancellation prevents any not-yet-sent page action.
  * @param targetTab - tab selected by the background affinity controller.
  * @param targetStillAllowed - final fail-closed guard after asynchronous approval/navigation checks.
+ * @param followCreatedTab - commits a newly opened tab as the controlled target.
+ * @param tabManagement - access mode and affinity callbacks for tab collection tools.
  * @returns the content script's answer, or a stable error when no tab or
  *   content script is available.
  */
@@ -389,12 +673,20 @@ export async function dispatchToolCall(
   budget?: ContentBudget,
   authorize?: (prompt: ApprovalPrompt) => Promise<ApprovalAuthorization>,
   signal?: AbortSignal,
-  targetTab?: Pick<chrome.tabs.Tab, 'id' | 'url'>,
+  targetTab?: Pick<chrome.tabs.Tab, 'id' | 'url'> & { windowId?: number },
   targetStillAllowed?: () => boolean,
+  followCreatedTab?: (tab: chrome.tabs.Tab) => void | Promise<void>,
+  tabManagement: TabManagementContext = { unrestrictedAccess: false },
 ): Promise<ToolAnswer> {
   if (isCancelled(call, signal)) return cancelled()
+  const effectiveBudget = budget ?? { maxItems: 60, maxChars: DEFAULT_SNAPSHOT_MAX_CHARS }
+  if (isTabManagementTool(call.name)) {
+    return dispatchTabManagementTool(call, effectiveBudget, authorize, signal, tabManagement)
+  }
   // Privacy boundary: with sharing off, no page content may leave the page.
-  if (sharePageContent === 'off' && (call.name === 'browser_snapshot' || call.name === 'browser_get_text')) {
+  if (!tabManagement.unrestrictedAccess
+    && sharePageContent === 'off'
+    && (call.name === 'browser_snapshot' || call.name === 'browser_get_text')) {
     return { ok: false, error: { code: 'action-failed', message: 'Page content sharing is disabled in Settings > Page content sharing.' } }
   }
   const tab = targetTab ?? (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]
@@ -403,15 +695,19 @@ export async function dispatchToolCall(
     return { ok: false, error: { code: 'no-active-tab', message: 'No active tab is available for browser operations.' } }
   }
   if (targetStillAllowed?.() === false) return targetChanged()
-  const effectiveBudget = budget ?? { maxItems: 60, maxChars: DEFAULT_SNAPSHOT_MAX_CHARS }
   const frames = await listTabFrames(tab.id, tab.url)
   if (isCancelled(call, signal)) return cancelled()
   if (targetStillAllowed?.() === false) return targetChanged()
   const frameError = validateFrameTarget(call, frames)
   if (frameError !== undefined) return frameError
+  if (!isInjectablePage(tab.url) && !TAB_NATIVE_TOOLS.has(call.name)) {
+    return unavailable('The current page DOM is protected by the browser. Only snapshot metadata, navigate, open a new tab, back, forward, and reload are available on this page.')
+  }
   const targetError = validateElementTarget(call, tab.id, frames)
   if (targetError !== undefined) return targetError
-  const approval = approvalPromptForCall(call, sharePageContent, frames)
+  const approval = tabManagement.unrestrictedAccess
+    ? undefined
+    : approvalPromptForCall(call, sharePageContent, frames)
   if (approval !== undefined) {
     const authorization = authorize === undefined ? 'unavailable' : await authorize(approval)
     if (isCancelled(call, signal)) return cancelled()
@@ -434,6 +730,10 @@ export async function dispatchToolCall(
     const refreshedTargetError = validateElementTarget(call, tab.id, executionFrames)
     if (refreshedTargetError !== undefined) return refreshedTargetError
   }
+  if (call.name === 'browser_open_tab' || !isInjectablePage(tab.url)) {
+    return await dispatchTabNativeTool(tab.id, tab.url, tab.windowId, call, effectiveBudget, signal, targetStillAllowed, followCreatedTab)
+      ?? unavailable('The current page DOM is protected by the browser.')
+  }
   try {
     return await dispatchOnce(
       tab.id,
@@ -442,16 +742,13 @@ export async function dispatchToolCall(
       effectiveBudget,
       signal,
       targetStillAllowed,
-      sharePageContent === 'auto',
+      tabManagement.unrestrictedAccess || sharePageContent === 'auto',
     )
   } catch {
     if (isCancelled(call, signal)) return cancelled()
     // Manifest content scripts do not run retroactively in tabs that were
     // already open when an unpacked extension was installed or reloaded.
     // Recover in place so the user never has to refresh and lose page state.
-    if (!isInjectablePage(tab.url)) {
-      return unavailable('The current page does not support browser operations. Switch to a standard http or https page.')
-    }
     try {
       await injectContentScript(tab.id)
       if (isCancelled(call, signal)) return cancelled()
@@ -476,16 +773,17 @@ export async function dispatchToolCall(
         effectiveBudget,
         signal,
         targetStillAllowed,
-        sharePageContent === 'auto',
+        tabManagement.unrestrictedAccess || sharePageContent === 'auto',
       )
     } catch {
-      return unavailable('The content script could not be loaded on this page. Chrome internal and protected pages do not support browser operations.')
+      return await dispatchTabNativeTool(tab.id, tab.url, tab.windowId, call, effectiveBudget, signal, targetStillAllowed, followCreatedTab)
+        ?? unavailable('The content script could not be loaded on this page. Its DOM does not support browser operations.')
     }
   }
 }
 
 function validateFrameTarget(call: ToolCall, frames: TabFrame[]): ToolAnswer | undefined {
-  if (call.name === 'browser_snapshot') return undefined
+  if (call.name === 'browser_snapshot' || call.name === 'browser_open_tab') return undefined
   const frameId = requestedFrame(call.args)
   if (frameId < 0) return { ok: false, error: { code: 'action-failed', message: 'frame must be a non-negative integer.' } }
   if (!frames.some((frame) => frame.frameId === frameId)) {

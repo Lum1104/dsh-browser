@@ -1,6 +1,6 @@
 {
   "name": "dsh-browser",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Standalone dsh browser bridge and controlled-tab Chrome/Firefox extension workspace",
   "author": "Yuxiang Lin",
   "license": "MIT",
@@ -8,11 +8,13 @@
   "packageManager": "pnpm@11.7.0",
   "scripts": {
     "build": "pnpm --filter @yuxianglin/dsh-bridge-browser run build && pnpm --filter dsh-browser-extension run build",
-    "start": "dsh web",
+    "dsh": "dsh",
+    "start": "pnpm dsh web",
+    "start:source": "pnpm --dir ../deepseek-harness dsh web",
     "test": "pnpm --filter @yuxianglin/dsh-bridge-browser run test && pnpm --filter dsh-browser-extension run test",
     "typecheck": "pnpm --filter @yuxianglin/dsh-bridge-browser run typecheck && pnpm --filter dsh-browser-extension run typecheck"
   },
   "dependencies": {
-    "@deepseek-ai/dsh": "0.1.1-rc.1"
+    "@deepseek-ai/dsh": "0.1.2-rc.1"
   }
 }

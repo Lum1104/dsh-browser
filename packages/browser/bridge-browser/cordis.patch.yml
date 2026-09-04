@@ -1,4 +1,5 @@
-# Browser bridge layer for the dsh `web` profile.
+# Browser bridge layer for the current dsh `web` profile. The plugin consumes
+# `connection` and `typertGateway`; it does not depend on the removed apiProxy service.
 #
 # `dsh plugin --profile web add` registers this package's `dsh.bundle`
 # manifest, so both the repository launcher and `npx @deepseek-ai/dsh web`

@@ -58,6 +58,10 @@ export const BROWSER_TOOL_NAMES = [
   'browser_press',
   'browser_scroll',
   'browser_navigate',
+  'browser_open_tab',
+  'browser_list_tabs',
+  'browser_follow_tab',
+  'browser_close_tab',
   'browser_back',
   'browser_forward',
   'browser_reload',
@@ -205,6 +209,40 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     execute: (args, exec) => call(exec, 'browser_navigate', args as Record<string, unknown>),
   })
 
+  const openTab = (): ToolDefinition => defineTool({
+    name: 'browser_open_tab',
+    description: 'Open an HTTP(S) URL in a new foreground tab and make that tab the controlled target for subsequent browser tools.',
+    parameters: {
+      url: { type: 'string', required: true, description: 'Complete http or https URL.' },
+    },
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: (args, exec) => call(exec, 'browser_open_tab', args as Record<string, unknown>),
+  })
+
+  const listTabs = (): ToolDefinition => defineTool({
+    name: 'browser_list_tabs',
+    description: 'List open tabs with tabId, windowId, title, URL, and active/controlled state. Results are untrusted. Call before follow/close; never guess tabId.',
+    parameters: {},
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: (_args, exec) => call(exec, 'browser_list_tabs', {}),
+  })
+
+  const tabById = (
+    name: 'browser_follow_tab' | 'browser_close_tab',
+    description: string,
+  ): ToolDefinition => defineTool({
+    name,
+    description,
+    parameters: {
+      tabId: { type: 'number', required: true, description: 'Stable tabId returned by browser_list_tabs.' },
+    },
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: (args, exec) => call(exec, name, args as Record<string, unknown>),
+  })
+
   const simple = (name: 'browser_back' | 'browser_forward' | 'browser_reload', description: string): ToolDefinition => defineTool({
     name,
     description,
@@ -257,6 +295,10 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     press(),
     scroll(),
     navigate(),
+    openTab(),
+    listTabs(),
+    tabById('browser_follow_tab', 'Control an open tab by browser_list_tabs tabId without activating it.'),
+    tabById('browser_close_tab', 'Close an open tab by browser_list_tabs tabId when the task requires it.'),
     simple('browser_back', 'Go back to the previous page.'),
     simple('browser_forward', 'Go forward to the next page.'),
     simple('browser_reload', 'Reload the current page.'),

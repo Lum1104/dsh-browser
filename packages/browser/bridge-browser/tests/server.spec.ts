@@ -2,8 +2,7 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
-import type { MuxFrame, RpcRequest } from '@deepseek-ai/dsh-host-apiproxy/api'
-import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type { LegacyEventEnvelope } from '../src/legacy-rpc.ts'
 import { BridgeServer, BridgeToolError, isLoopbackAddress, messageToText, payloadCode, payloadMessage } from '../src/server.ts'
 import { BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, type BridgeFrame } from '../src/protocol.ts'
 import { SessionPurgeError } from '../src/session-purge.ts'
@@ -29,10 +28,10 @@ async function startBridge(overrides: Partial<ConstructorParameters<typeof Bridg
     status: 200,
     headers: { 'content-type': 'application/json' },
   }))
-  const events: AsyncIterable<RpcRequest<MuxFrame>> = {
+  const events: AsyncIterable<LegacyEventEnvelope> = {
     async *[Symbol.asyncIterator]() {
-      yield { rpcId: RpcId('e1'), payload: { type: 'session/subscribed', sessionId: 's1' as never, lastSeq: 0 } }
-      yield { rpcId: RpcId('e2'), payload: { type: 'session/queue', sessionId: 's1' as never, items: [] } }
+      yield { rpcId: 'e1', payload: { type: 'session/subscribed', sessionId: 's1', lastSeq: 0 } }
+      yield { rpcId: 'e2', payload: { type: 'session/queue', sessionId: 's1', items: [] } }
     },
   }
   const bridge = new BridgeServer({
@@ -608,9 +607,9 @@ describe('BridgeServer', () => {
   })
 
   it('stops the stream-failed arm when the pump fails after the socket closed', async () => {
-    const lateFailEvents: AsyncIterable<RpcRequest<MuxFrame>> = {
+    const lateFailEvents: AsyncIterable<LegacyEventEnvelope> = {
       async *[Symbol.asyncIterator]() {
-        yield { rpcId: RpcId('l1'), payload: { type: 'session/subscribed', sessionId: 's1' as never, lastSeq: 0 } }
+        yield { rpcId: 'l1', payload: { type: 'session/subscribed', sessionId: 's1', lastSeq: 0 } }
         await new Promise((resolve) => { setTimeout(resolve, 120) })
         throw new Error('late failure')
       },
@@ -735,9 +734,9 @@ describe('BridgeServer', () => {
   })
 
   it('emits a stream-failed error frame when the event stream throws', async () => {
-    const failingEvents: AsyncIterable<RpcRequest<MuxFrame>> = {
+    const failingEvents: AsyncIterable<LegacyEventEnvelope> = {
       async *[Symbol.asyncIterator]() {
-        yield { rpcId: RpcId('f1'), payload: { type: 'session/subscribed', sessionId: 's1' as never, lastSeq: 0 } }
+        yield { rpcId: 'f1', payload: { type: 'session/subscribed', sessionId: 's1', lastSeq: 0 } }
         throw new Error('stream broke')
       },
     }
@@ -751,10 +750,10 @@ describe('BridgeServer', () => {
   })
 
   it('stops pumping events once the socket closes mid-stream', async () => {
-    const slowEvents: AsyncIterable<RpcRequest<MuxFrame>> = {
+    const slowEvents: AsyncIterable<LegacyEventEnvelope> = {
       async *[Symbol.asyncIterator]() {
         for (let i = 0; i < 100; i += 1) {
-          yield { rpcId: RpcId(`s${i}`), payload: { type: 'session/subscribed', sessionId: 's1' as never, lastSeq: i } }
+          yield { rpcId: `s${i}`, payload: { type: 'session/subscribed', sessionId: 's1', lastSeq: i } }
           await new Promise((resolve) => { setTimeout(resolve, 10) })
         }
       },

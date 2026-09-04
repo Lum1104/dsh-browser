@@ -6,9 +6,9 @@
  * The route this server mounts (`/ext/bridge`) lives OUTSIDE the /api trust
  * fence (which only guards the client-connection routes), so the bridge brings
  * its own authentication: a bearer token presented in the `hello` frame within
- * HELLO_TIMEOUT_MS. Gateway RPCs are dispatched through the same fetch-shaped
- * handler the /api carrier uses (`toFetchHandler`), so schema validation and
- * error envelopes are identical to the GUI path. Methods the /api carrier
+ * HELLO_TIMEOUT_MS. Gateway RPCs are dispatched through a fetch-shaped
+ * compatibility handler, so the current Typert gateway still owns validation
+ * and error envelopes. Methods the /api carrier
  * pins to loopback (`PRIVILEGED_METHODS`) stay loopback-only here regardless
  * of the token, defense in depth for `--host 0.0.0.0` deployments.
  *
@@ -23,7 +23,7 @@ import { randomUUID } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
-import type { MuxFrame, RpcRequest } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type { LegacyEventEnvelope } from './legacy-rpc.ts'
 import {
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   BRIDGE_SESSION_PURGE_METHOD,
@@ -84,10 +84,10 @@ export class BridgeToolError extends Error {
 export interface BridgeServerDeps {
   /** Bearer token the extension must present in `hello`. */
   token: string
-  /** Fetch-shaped gateway carrier (from `toFetchHandler(ctx.apiProxy)`). */
+  /** Fetch-shaped compatibility carrier over the current Connection gateway. */
   apiHandler: { fetch: (request: Request) => Promise<Response> }
-  /** Per-connection event stream (usually `ctx.apiProxy.events.mux`). */
-  openEvents: (signal: AbortSignal) => AsyncIterable<RpcRequest<MuxFrame>>
+  /** Per-connection event stream projected from current Typert and Session events. */
+  openEvents: (signal: AbortSignal) => AsyncIterable<LegacyEventEnvelope>
   /** Default per-tool-call timeout in ms. */
   toolTimeoutMs: number
   /** Capabilities to echo in `hello.ok` (negotiated snapshot budgets). */

@@ -5,7 +5,7 @@
 # No further configuration is required: the extension discovers local dsh automatically and loopback connections require no token.
 set -euo pipefail
 
-REPOSITORY="Lum1104/dsh-browser"
+REPOSITORY="ChangeYourWay/dsh-browser"
 REMOTE_REF="main"
 DSH_HOME_DIR="${DSH_HOME:-$HOME/.dsh}"
 MANAGED_ROOT="$DSH_HOME_DIR/dsh-browser"
@@ -418,6 +418,6 @@ print_pair "• 点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "
 print_pair "• 扩展会自动发现本机 dsh，无需填写地址或 token" "The extension discovers local dsh automatically; no address or token is required"
 printf '• 启动固定版本：cd %q && pnpm start\n' "$ROOT"
 printf '   Start the pinned version: cd %q && pnpm start\n' "$ROOT"
-print_pair "• 或启动 npm 最新版本：npx @deepseek-ai/dsh web" "Or start the latest npm version: npx @deepseek-ai/dsh web"
+print_pair "• 或直接启动固定 npm 版本：npx @deepseek-ai/dsh@0.1.2-rc.1 web" "Or start the pinned npm version directly: npx @deepseek-ai/dsh@0.1.2-rc.1 web"
 printf '\n'
-print_pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/Lum1104/dsh-browser" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/Lum1104/dsh-browser"
+print_pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/ChangeYourWay/dsh-browser" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/ChangeYourWay/dsh-browser"

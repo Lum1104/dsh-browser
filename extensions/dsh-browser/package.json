@@ -1,7 +1,7 @@
 {
   "name": "dsh-browser-extension",
   "description": "Chrome and Firefox MV3 extension: sidebar chat with a local dsh instance and text-only read/operate of a user-controlled tab through the dsh browser bridge",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": "Yuxiang Lin",
   "license": "MIT",
   "private": true,

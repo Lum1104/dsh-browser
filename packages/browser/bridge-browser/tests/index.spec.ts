@@ -3,14 +3,18 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { apply, assertPositiveInteger, Config, resolveConfig } from '../src/index.ts'
 
 /** Minimal context stub: apply only needs the services at registration time. */
 function stubContext(): Context {
   return {
-    apiProxy: { sessions: {} } as ApiProxy,
+    connection: {
+      createSharedFetchHandler: () => ({ fetch: async () => new Response('not found', { status: 404 }) }),
+    },
+    typertGateway: {
+      wireStream: { open: async () => ({ async *[Symbol.asyncIterator]() {} }) },
+    },
     webServer: { port: 0, registerUpgrade: () => () => {}, register: () => () => {} },
     tools: { register: () => () => {} },
     agents: { get: () => undefined },

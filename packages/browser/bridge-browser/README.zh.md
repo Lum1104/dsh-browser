@@ -2,9 +2,9 @@
 
 [English](README.md) | 中文
 
-dsh 的**浏览器操作桥**：在宿主 webserver 上挂载一个 **token 认证的 WebSocket 通道**（`/ext/bridge`），供 Chrome 扩展连接；通过 `/api` 同款 fetch handler 代理网关 RPC、按连接泵送会话事件，并注册**纯文本**的 `browser_*` 工具集——经扩展在真实浏览器中读取页面、点击元素、填写表单、滚动与导航，登录态保留。侧边栏是对话入口，工具才是产品本体。
+dsh 的**浏览器操作桥**：在宿主 webserver 上挂载一个 **token 认证的 WebSocket 通道**（`/ext/bridge`），供 Chrome 扩展连接；把扩展的点分 RPC 协议转换到现版本 Connection 与 Typert Gateway 服务、按连接泵送会话和 Remote 事件，并注册**纯文本**的 `browser_*` 工具集——经扩展在真实浏览器中读取页面、点击元素、填写表单、滚动与导航，登录态保留。侧边栏是对话入口，工具才是产品本体。
 
-**纯文本浏览器工具，多模态对话透传**：页面快照仍是结构化文本（标题、正文、带编号的交互清单、敏感值打码的表单字段），所有浏览器动作按稳定编号寻址。通用 RPC 通道也会透传 dsh 0.1.1 的图片消息和持久附件读取；延迟创建的新会话只在宿主确实挂载附件服务时声明图片限制。
+**纯文本浏览器工具，多模态对话透传**：页面快照仍是结构化文本（标题、正文、带编号的交互清单、敏感值打码的表单字段），所有浏览器动作按稳定编号寻址。兼容通道也会透传现版本 dsh 的图片消息和持久附件读取；延迟创建的新会话只在宿主确实挂载附件服务时声明图片限制。
 
 ## 配置
 
@@ -24,14 +24,14 @@ dsh 的**浏览器操作桥**：在宿主 webserver 上挂载一个 **token 认�
 远程安装器会下载一个由脚本托管的 workspace，构建插件，并将它的官方 bundle 注册到本机 dsh 的 `web` profile。该方式无需 Git，也无需提前 clone：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ChangeYourWay/dsh-browser/refs/heads/main/scripts/install.sh | bash
 cd ~/.dsh/dsh-browser && pnpm start
 ```
 
 Windows 请改用 PowerShell 安装器：
 
 ```powershell
-$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/ChangeYourWay/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 cd $HOME\.dsh\dsh-browser; pnpm start
 ```
 
@@ -58,7 +58,7 @@ npx @deepseek-ai/dsh web
 帧为按 `t` 判别的 JSON 对象，定义在 [`protocol.ts`](src/protocol.ts)，是通过 workspace 包的 `./src/*` export 与扩展共享的真源。构建后的包还会发布 `@yuxianglin/dsh-bridge-browser/protocol`，供外部消费方使用。
 
 - 客户端 → 服务端：`hello`（认证+caps）、`rpc`（网关方法透传）、`respond`（按 RPC id 结算宿主交互）、`tool.result`、`pong`。
-- 服务端 → 客户端：`hello.ok`（回显协商后的 caps）、`rpc.result`、`respond.result`（相关联的受理结果或错误）、`event`（网关事件信封，与 `/api/events.mux` 同形）、`tool.call`、`ping`、`error`。
+- 服务端 → 客户端：`hello.ok`（回显协商后的 caps）、`rpc.result`、`respond.result`（相关联的受理结果或错误）、`event`（由现版本 Remote 与 Session 事件投影得到的兼容信封）、`tool.call`、`ping`、`error`。
 
 每个 `respond` 同时携带全局唯一的传输 id 与宿主交互的 `rpcId`。扩展只把回执路由给发起操作的面板，并在超时、面板关闭或桥断线时拒绝尚未完成的响应。
 
@@ -69,6 +69,8 @@ npx @deepseek-ai/dsh web
 | `browser_snapshot` | 结构化文本快照（标题/URL/正文/清单/表单）；`delta: true` 只返回变化。 |
 | `browser_click` / `browser_type` / `browser_press` | 按稳定编号操作清单元素。 |
 | `browser_scroll` / `browser_navigate` / `browser_back` / `browser_forward` / `browser_reload` | 页面移动。 |
+| `browser_open_tab` | 在前台新标签页打开 HTTP(S) 地址，并让后续工具跟随该标签页。 |
+| `browser_list_tabs` / `browser_follow_tab` / `browser_close_tab` | 按稳定标签页 ID 查看、选择和关闭已打开的标签页。 |
 | `browser_get_text` / `browser_wait` | 读区域文本 / 稳定检测。 |
 
 ## 模型体验

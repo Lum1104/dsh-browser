@@ -5,10 +5,8 @@
  * @module @yuxianglin/dsh-bridge-browser/src/session-workspace
  */
 
-import { randomUUID } from 'node:crypto'
 import { mkdir } from 'node:fs/promises'
-import type { ApiProxy, WorkspaceId } from '@deepseek-ai/dsh-host-apiproxy/api'
-import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type { LegacyRpc } from './legacy-rpc.ts'
 
 type Warn = (message: string) => void
 
@@ -24,35 +22,25 @@ type Warn = (message: string) => void
  * @returns the original API for opt-out, otherwise an API with wrapped session creation.
  */
 export function withSessionWorkspace(
-  api: ApiProxy,
+  api: LegacyRpc,
   workspacePath: string,
   warn: Warn,
-): ApiProxy {
+): LegacyRpc {
   if (workspacePath === '') return api
 
-  let workspacePromise: Promise<WorkspaceId | undefined> | undefined
-  const ensureWorkspace = (): Promise<WorkspaceId | undefined> => {
+  let workspacePromise: Promise<string | undefined> | undefined
+  const ensureWorkspace = (): Promise<string | undefined> => {
     if (workspacePromise !== undefined) return workspacePromise
     workspacePromise = (async () => {
       try {
         await mkdir(workspacePath, { recursive: true })
-        const workspaceApi = (api as { workspace?: ApiProxy['workspace'] }).workspace
-        if (workspaceApi === undefined) {
-          warn(`browser bridge: workspace API is unavailable; sessions will remain ungrouped`)
-          return undefined
+        const response = await api('workspace.create', { path: workspacePath }) as {
+          workspace?: { workspaceId?: unknown }
         }
-        const response = await workspaceApi.create({
-          rpcId: RpcId(randomUUID()),
-          payload: { path: workspacePath },
-        })
-        if (!response.result.ok) {
-          warn(
-            `browser bridge: workspace.create failed for "${workspacePath}" `
-            + `(${response.result.error.code}: ${response.result.error.message}); sessions will remain ungrouped`,
-          )
-          return undefined
+        if (typeof response.workspace?.workspaceId !== 'string') {
+          throw new Error('workspace.create returned no workspaceId')
         }
-        return response.result.value.workspace.workspaceId
+        return response.workspace.workspaceId
       } catch (error: unknown) {
         warn(
           `browser bridge: could not prepare session workspace "${workspacePath}": `
@@ -64,18 +52,17 @@ export function withSessionWorkspace(
     return workspacePromise
   }
 
-  return {
-    ...api,
-    sessions: {
-      ...api.sessions,
-      async create(request) {
-        if (request.payload.workspaceId !== undefined) return api.sessions.create(request)
-        const workspaceId = await ensureWorkspace()
-        if (workspaceId === undefined) return api.sessions.create(request)
-        const payload = { ...request.payload, workspaceId }
-        delete payload.cwd
-        return api.sessions.create({ ...request, payload })
-      },
-    },
+  return async (method, payload, signal) => {
+    if (method !== 'session.create') return api(method, payload, signal)
+    if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+      return api(method, payload, signal)
+    }
+    const request = payload as Record<string, unknown>
+    if (request.workspaceId !== undefined) return api(method, payload, signal)
+    const workspaceId = await ensureWorkspace()
+    if (workspaceId === undefined) return api(method, payload, signal)
+    const grouped: Record<string, unknown> = { ...request, workspaceId }
+    delete grouped.cwd
+    return api(method, grouped, signal)
   }
 }
