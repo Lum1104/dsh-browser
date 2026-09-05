@@ -87,6 +87,15 @@ describe('apply', () => {
     await apply(stubContext(), { token: 'fixed-token', ...VALID, sessionWorkspacePath: '' })
   })
 
+  it.each([undefined, {}, { wireStream: {} }])('rejects unsupported Gateway capabilities: %j', async (gateway) => {
+    const ctx = stubContext()
+    const get = ctx.get.bind(ctx)
+    vi.spyOn(ctx, 'get').mockImplementation((key) => key === 'typertGateway' ? gateway : get(key))
+    const register = vi.spyOn(ctx.webServer, 'registerUpgrade')
+    await expect(apply(ctx, { token: 'fixed-token', ...VALID })).rejects.toThrow(/dsh 0\.1\.2-rc\.1.*wireStream unavailable/)
+    expect(register).not.toHaveBeenCalled()
+  })
+
   it('generates and persists a token when none is configured', async () => {
     const home = await mkdtemp(join(tmpdir(), 'dsh-bridge-home-'))
     dirs.push(home)
