@@ -3,8 +3,7 @@ packages:
   - extensions/*
   - packages/*/*
 
-# dsh release lines carry incompatible branded peer types. Keep resolution
-# explicit so rc.2 ApiProxy packages never receive 0.1.2 Remote providers.
+# Keep DSH peer providers explicit and on the tested 0.1.2-rc.1 release line.
 autoInstallPeers: false
 
 # dsh 运行时与扩展构建依赖这些受信任包的安装脚本。

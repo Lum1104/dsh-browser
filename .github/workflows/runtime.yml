@@ -1,0 +1,29 @@
+name: Runtime compatibility
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  clean-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+      - name: Install into a fresh store
+        run: pnpm install --frozen-lockfile --store-dir "$RUNNER_TEMP/dsh-pnpm-store"
+      - run: pnpm run check:runtime
+      - run: pnpm run typecheck
+      - run: pnpm run test
+      - run: pnpm run build
+      - run: pnpm run test:smoke

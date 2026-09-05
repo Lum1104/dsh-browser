@@ -2,8 +2,7 @@
  * Bridge-owned Host API consumed by the WebSocket carrier.
  *
  * This boundary keeps release-specific Host topology out of the browser wire
- * server. dsh 0.1.2 implements it with Typert Remotes and Connection; the
- * temporary 0.1.1-rc.2 compatibility island implements it with ApiProxy.
+ * server. dsh 0.1.2 implements it with Typert Remotes and Connection.
  *
  * @module
  */

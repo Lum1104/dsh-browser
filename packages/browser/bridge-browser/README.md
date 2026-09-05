@@ -37,7 +37,7 @@ cd $HOME\.dsh\dsh-browser; pnpm start
 
 Developers can instead clone the repository and run `./scripts/install.sh` followed by `pnpm start` from that checkout. The local mode uses the current branch without downloading or overwriting source files. Both installation modes register the same profile bundle; build tools resolve only from the selected workspace and never from a parent checkout or parent `node_modules` directory.
 
-The primary runtime is dsh 0.1.2-rc.1. A temporary ApiProxy adapter also supports 0.1.1-rc.2; earlier runtimes are not supported:
+The workspace pins dsh 0.1.2-rc.1, the minimum supported runtime. Older DSH releases are not supported:
 
 ```sh
 npx @deepseek-ai/dsh@0.1.2-rc.1 web

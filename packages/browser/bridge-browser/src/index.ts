@@ -6,7 +6,7 @@
  * webserver, OUTSIDE the /api trust fence — so it brings its own bearer-token
  * authentication (first frame `hello` within HELLO_TIMEOUT_MS). Extension
  * calls, Session streams, and Host waterfalls use dsh 0.1.2's Typert Gateway
- * and Connection services, with a temporary 0.1.1-rc.2 ApiProxy adapter.
+ * and Connection services.
  * Tools execute by dispatching
  * `tool.call` frames to the connected extension, which performs the action in
  * the tab explicitly controlled by the user.
@@ -21,7 +21,6 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-attachment'
-import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
@@ -44,7 +43,6 @@ import {
   type HostConnectionLike,
   type TypertGatewayLike,
 } from './remote-host-api.ts'
-import { createLegacyHostApi } from './legacy-host-api.ts'
 import { isRecord, type BrowserHostApi } from './host-api.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -136,19 +134,13 @@ export function resolveConfig(config: Config): ResolvedConfig {
 export async function apply(ctx: Context, config: Config): Promise<void> {
   const resolved = resolveConfig(config)
 
-  const tokenRes = await resolveToken(resolved.token)
   const gateway = ctx.get('typertGateway') as unknown as GatewayCandidate | undefined
   const connection = ctx.get('connection') as unknown as HostConnectionLike | undefined
-  if (gateway === undefined) throw new Error('bridge-browser: dsh typertGateway service is required')
-  // TEMPORARY rc.2 compatibility. Remove this branch, createRc2HostApi(),
-  // legacy-host-api.ts, and dsh-host-apiproxy deps once minimum dsh is 0.1.2.
-  if (!hasRemoteWireStream(gateway)) {
-    await ctx.inject(['apiProxy'], async (legacyCtx) => {
-      mountBridge(legacyCtx, resolved, tokenRes, await createRc2HostApi(legacyCtx))
-    })
-    return
+  if (gateway === undefined || !hasRemoteWireStream(gateway)) {
+    throw new Error('bridge-browser: dsh 0.1.2-rc.1 or a compatible newer runtime is required (Gateway wireStream unavailable)')
   }
   if (connection === undefined) throw new Error('bridge-browser: dsh connection service is required')
+  const tokenRes = await resolveToken(resolved.token)
   await ensureRemoteEventSource(ctx, gateway)
   mountBridge(ctx, resolved, tokenRes, createRemoteHostApi(gateway, connection))
 }
@@ -172,9 +164,7 @@ function mountBridge(
   )
   const browserContext = new BrowserContextInjector(ctx.agents)
   ctx.on('agent/session-start', ({ agent }) => {
-    // rc.2 and 0.1.2 brand Agent/Session identities differently, although the
-    // runtime surface used here (`id` + `inject`) is intentionally unchanged.
-    browserContext.activate(agent as Parameters<BrowserContextInjector['activate']>[0])
+    browserContext.activate(agent)
   })
 
   const purgeSession = async (sessionId: string): Promise<void> => {
@@ -270,7 +260,7 @@ type GatewayCandidate = Pick<TypertGatewayLike, 'invoke'> & {
   readonly wireStream?: TypertGatewayLike['wireStream']
 }
 
-/** Distinguish the 0.1.2 Gateway contract from temporary 0.1.1-rc.2 support. */
+/** Check the minimum supported Gateway contract before mounting the bridge. */
 function hasRemoteWireStream(gateway: GatewayCandidate): gateway is TypertGatewayLike {
   return gateway.wireStream !== undefined
     && typeof gateway.wireStream.open === 'function'
@@ -303,11 +293,4 @@ async function ensureRemoteEventSource(ctx: Context, gateway: TypertGatewayLike)
 
   const remoteAssembly = await import('@deepseek-ai/dsh-api-remotes')
   remoteAssembly.apply(ctx)
-}
-
-async function createRc2HostApi(ctx: Context): Promise<BrowserHostApi> {
-  const apiProxy = ctx.get('apiProxy') as ApiProxy | undefined
-  if (apiProxy === undefined) throw new Error('bridge-browser: dsh 0.1.1-rc.2 apiProxy service is required')
-  const { toFetchHandler } = await import('@deepseek-ai/dsh-host-apiproxy')
-  return createLegacyHostApi(apiProxy, toFetchHandler(apiProxy))
 }
