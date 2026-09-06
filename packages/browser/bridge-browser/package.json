@@ -49,21 +49,20 @@
     "src"
   ],
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-agent": "^0.1.1-rc.2 || ^0.1.2-rc.1",
-    "@deepseek-ai/dsh-api-gateway": "^0.1.1-rc.2 || ^0.1.2-rc.1",
-    "@deepseek-ai/dsh-api-remotes": "^0.1.1-rc.2 || ^0.1.2-rc.1",
-    "@deepseek-ai/dsh-attachment": "^0.1.1-rc.2 || ^0.1.2-rc.1",
-    "@deepseek-ai/dsh-client-connection": "^0.1.1-rc.2 || ^0.1.2-rc.1",
-    "@deepseek-ai/dsh-client-locale": "^0.1.1-rc.2 || ^0.1.2-rc.1",
-    "@deepseek-ai/dsh-client-ui-settings": "^0.1.1-rc.2 || ^0.1.2-rc.1",
-    "@deepseek-ai/dsh-client-ui-slots": "^0.1.1-rc.2 || ^0.1.2-rc.1",
-    "@deepseek-ai/dsh-home-paths": "^0.1.1-rc.2 || ^0.1.2-rc.1",
-    "@deepseek-ai/dsh-host-apiproxy": "^0.1.1-rc.2",
-    "@deepseek-ai/dsh-host-webserver": "^0.1.1-rc.2 || ^0.1.2-rc.1",
-    "@deepseek-ai/dsh-invariants": "^0.1.1-rc.2 || ^0.1.2-rc.1",
-    "@deepseek-ai/dsh-llm": "^0.1.1-rc.2 || ^0.1.2-rc.1",
-    "@deepseek-ai/dsh-tools": "^0.1.1-rc.2 || ^0.1.2-rc.1",
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-agent": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-api-gateway": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-api-remotes": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-attachment": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-client-connection": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-client-locale": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-home-paths": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-invariants": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-llm": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.1.2-rc.1",
     "react": ">=18.2.0 <19"
   },
   "peerDependenciesMeta": {
@@ -74,9 +73,6 @@
       "optional": true
     },
     "@deepseek-ai/dsh-client-ui-slots": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-host-apiproxy": {
       "optional": true
     },
     "react": {
@@ -103,7 +99,6 @@
     "@deepseek-ai/dsh-attachment": "0.1.2-rc.1",
     "@deepseek-ai/dsh-client-connection": "0.1.2-rc.1",
     "@deepseek-ai/dsh-home-paths": "0.1.2-rc.1",
-    "@deepseek-ai/dsh-host-apiproxy": "0.1.1-rc.2",
     "@deepseek-ai/dsh-host-webserver": "0.1.2-rc.1",
     "@deepseek-ai/dsh-invariants": "0.1.2-rc.1",
     "@deepseek-ai/dsh-llm": "0.1.2-rc.1",

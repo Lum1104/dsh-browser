@@ -11,7 +11,7 @@
 浏览器操作仍采用纯文本设计：页面会转换为结构化文本和带编号的交互元素清单，模型通过编号定位元素。dsh 0.1.2 的多模态对话走独立通道——宿主声明图片能力时，侧栏可发送 PNG、JPEG、WebP 和 GIF；浏览器工具本身仍不会截取页面截图。
 
 > [!IMPORTANT]
-> 当前工作区以 dsh 0.1.2-rc.1 为主运行时，并通过临时 ApiProxy 适配层兼容 0.1.1-rc.2；更早版本不受支持。
+> 当前工作区固定使用 dsh 0.1.2-rc.1，也是最低支持版本；不再支持旧版 DSH。
 
 ## 快速安装
 
@@ -158,6 +158,8 @@ Chrome 本机使用无需配置；Firefox 需要填写上述本地桥 token。�
 pnpm run build
 pnpm run typecheck
 pnpm run test
+pnpm run check:runtime
+pnpm run test:smoke
 
 pnpm --filter @yuxianglin/dsh-bridge-browser run build
 pnpm --filter @yuxianglin/dsh-bridge-browser run typecheck
@@ -173,6 +175,10 @@ pnpm --filter dsh-browser-extension run test
 - 启动前桥接插件必须已有 `lib/` 供 Loader 加载；`scripts/install.sh` 和根目录 `pnpm run build` 都会先构建插件再构建扩展。
 - 桥构建使用 Node.js `copyFileSync` 复制浏览器客户端，因此同一条包脚本不依赖 Unix `cp` 命令。
 - `@deepseek-ai/dsh` 与桥接插件的依赖固定在同一条经过验证的公开发布线上；升级时必须同时更新 manifest、锁文件并重跑根目录检查。
+
+`check:runtime` 检查实际解析的 DSH 依赖和锁文件；`test:smoke` 使用临时 DSH home 启动真实 web 宿主，验证桥接和重启后的会话读取，无需模型密钥。CI 在干净安装后运行这些检查。
+
+如果遇到 `cache.hydratePrepared is not a function`，更新仓库后重新运行 `pnpm install --frozen-lockfile` 和 `pnpm run build`，再重启 `pnpm start`。无需删除会话数据或清空全局缓存。
 
 ## 安全
 

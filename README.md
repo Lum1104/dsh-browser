@@ -11,7 +11,7 @@ Connect [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to t
 Browser operation remains text-only: pages become structured text with a numbered inventory of interactive elements, and the model addresses those elements by number. dsh 0.1.2 multimodal chat is separate from that page channel—the side panel accepts PNG, JPEG, WebP, and GIF attachments when the host advertises image support, while browser tools still never capture screenshots.
 
 > [!IMPORTANT]
-> The workspace uses dsh 0.1.2-rc.1 as its primary runtime and temporarily supports 0.1.1-rc.2 through an ApiProxy compatibility adapter. Earlier releases are not supported.
+> The workspace pins dsh 0.1.2-rc.1, the minimum supported runtime. Older DSH releases are not supported.
 
 ## Quick install
 
@@ -158,6 +158,8 @@ The bridge plugin and Chrome/Firefox extension are both members of this reposito
 pnpm run build
 pnpm run typecheck
 pnpm run test
+pnpm run check:runtime
+pnpm run test:smoke
 
 pnpm --filter @yuxianglin/dsh-bridge-browser run build
 pnpm --filter @yuxianglin/dsh-bridge-browser run typecheck
@@ -173,6 +175,10 @@ Notes:
 - The bridge plugin must have a built `lib/` before startup because the loader consumes it; both `scripts/install.sh` and the root `pnpm run build` build the plugin before the extension.
 - The bridge build copies its browser client with Node.js `copyFileSync`, so the same package script works without a Unix `cp` executable.
 - The dependencies of `@deepseek-ai/dsh` and the bridge plugin are pinned to the same tested public release line. An upgrade must update the manifests and lockfile together and rerun the root checks.
+
+`check:runtime` checks the resolved DSH dependencies and lockfile; `test:smoke` starts the real web host in a temporary DSH home and verifies the bridge and session reads after a restart, without model credentials. CI runs these checks after a clean installation.
+
+If you encounter `cache.hydratePrepared is not a function`, update the repository, rerun `pnpm install --frozen-lockfile` and `pnpm run build`, then restart `pnpm start`. Session data and the global package cache can be kept.
 
 ## Security
 
