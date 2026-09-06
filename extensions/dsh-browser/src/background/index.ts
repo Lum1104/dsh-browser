@@ -197,6 +197,8 @@ interface ActiveToolCall {
 }
 
 const activeToolCalls = new Map<string, ActiveToolCall>()
+/** Disconnection drops result ownership, but dispatched operations must still settle before revocation. */
+const unsettledToolCalls = new Set<ActiveToolCall>()
 let lastPersistedAffinity: string | undefined
 let affinityPersistence = Promise.resolve()
 /** Per-session snapshot refreshes preserve prompt ordering without cross-session cancellation. */
@@ -1061,6 +1063,7 @@ function routeToolCall(call: ToolCall): void {
     settle: () => { settle() },
   }
   activeToolCalls.set(call.id, activeCall)
+  unsettledToolCalls.add(activeCall)
   const commitAction = (): void => { activeCall.committed = true }
   const rollbackActionCommit = (): void => {
     activeCall.committed = false
@@ -1150,6 +1153,7 @@ function routeToolCall(call: ToolCall): void {
       }
       if (answer.ok) {
         if (isNavigationCandidateTool(call.name)) await checkpointSessionPage(call.sessionId)
+        if (activeToolCalls.get(call.id) !== activeCall) return
         const socket = bridge
         if (socket === null) return
         socket.send({ t: 'tool.result', id: call.id, ok: true, result: answer.result })
@@ -1181,6 +1185,7 @@ function routeToolCall(call: ToolCall): void {
     },
   ).finally(() => {
     if (expiryTimer !== undefined) clearTimeout(expiryTimer)
+    unsettledToolCalls.delete(activeCall)
     activeCall.settle()
     if (activeToolCalls.get(call.id) === activeCall) activeToolCalls.delete(call.id)
   })
@@ -1192,7 +1197,7 @@ function cancelToolCall(id: string): void {
 }
 
 async function revokeUnrestrictedAccess(): Promise<void> {
-  const calls = [...activeToolCalls.values()].filter((call) => call.unrestrictedAccess)
+  const calls = [...unsettledToolCalls].filter((call) => call.unrestrictedAccess)
   const refreshes = [...activeFollowRefreshes.values()].filter((refresh) => refresh.unrestrictedAccess)
   for (const call of calls) {
     call.revocationRequested = true

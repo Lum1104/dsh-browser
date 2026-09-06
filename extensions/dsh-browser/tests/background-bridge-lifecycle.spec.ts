@@ -625,7 +625,7 @@ describe('background bridge lifecycle', () => {
     await vi.waitFor(() => { expect(chromeMock.tabs.remove).toHaveBeenCalledWith(2) })
   })
 
-  it('does not deliver a disconnected bridge call result to a replacement connection', async () => {
+  it('waits for disconnected committed actions during revocation and drops their results', async () => {
     let finishClose!: () => void
     const close = new Promise<void>((resolve) => { finishClose = resolve })
     const chromeMock = mockChrome({
@@ -674,11 +674,78 @@ describe('background bridge lifecycle', () => {
     })
     await Promise.resolve()
 
-    finishClose()
+    panel.onMessage.emit({
+      type: 'settings',
+      id: 'disable-after-reconnect',
+      settings: { unrestrictedBrowserAccess: false },
+    })
     await new Promise((resolve) => { setTimeout(resolve, 0) })
+    const savedBeforeClose = vi.mocked(chrome.storage.local.set).mock.calls.some(([items]) => (
+      (items.dshSettings as { unrestrictedBrowserAccess?: boolean }).unrestrictedBrowserAccess === false
+    ))
+    finishClose()
+    await vi.waitFor(() => {
+      expect(panel.postMessage).toHaveBeenCalledWith({ type: 'settings.result', id: 'disable-after-reconnect', ok: true })
+    })
+    expect(savedBeforeClose).toBe(false)
 
     expect(originalSocket.sent).not.toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'old-close' }))
     expect(replacementSocket.sent).not.toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'old-close' }))
+  })
+
+  it('does not send a navigation result across a reconnect during its checkpoint', async () => {
+    const tab = { id: 1, windowId: 1, title: 'New tab', url: 'chrome://newtab/' } as chrome.tabs.Tab
+    let pauseCheckpoint = false
+    let checkpointStarted = false
+    let finishCheckpoint!: (tab: chrome.tabs.Tab) => void
+    const checkpoint = new Promise<chrome.tabs.Tab>((resolve) => { finishCheckpoint = resolve })
+    const chromeMock = mockChrome({
+      localGet: async () => ({ dshSettings: {
+        bridgeUrl: 'wss://bridge.example/ext/bridge',
+        unrestrictedBrowserAccess: true,
+      } }),
+      tabQuery: async () => [tab],
+      tabGet: async () => {
+        if (!pauseCheckpoint) return tab
+        checkpointStarted = true
+        return checkpoint
+      },
+    })
+    chrome.tabs.reload = vi.fn(async () => { pauseCheckpoint = true })
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+    const original = FakeWebSocket.instances[0]!
+    original.open()
+    await Promise.resolve()
+    original.receive({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    await Promise.resolve()
+    original.receive({
+      t: 'tool.call', id: 'follow-before-reload', name: 'browser_follow_tab',
+      sessionId: 'checkpoint-session', args: { tabId: 1 }, expiresAt: Date.now() + 10_000,
+    })
+    await vi.waitFor(() => {
+      expect(original.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'follow-before-reload', ok: true }))
+    })
+    original.receive({
+      t: 'tool.call', id: 'old-reload', name: 'browser_reload',
+      sessionId: 'checkpoint-session', args: {}, expiresAt: Date.now() + 10_000,
+    })
+    await vi.waitFor(() => { expect(checkpointStarted).toBe(true) })
+    panel.onMessage.emit({ type: 'settings', settings: { bridgeUrl: 'wss://replacement.example/ext/bridge' } })
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(2) })
+    const replacement = FakeWebSocket.instances[1]!
+    replacement.open()
+    await Promise.resolve()
+    replacement.receive({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    await Promise.resolve()
+    finishCheckpoint(tab)
+    await new Promise((resolve) => { setTimeout(resolve, 0) })
+    for (const socket of [original, replacement]) {
+      expect(socket.sent).not.toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'old-reload' }))
+    }
   })
 
   it('cancels unrestricted recovery after an undelivered action rolls back its commit', async () => {
