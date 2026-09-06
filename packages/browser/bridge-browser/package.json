@@ -86,7 +86,7 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc -b --pretty false",
-    "build": "tsc -b --pretty false && tsdown && cp src/client.js lib/client.js"
+    "build": "tsc -b --pretty false && tsdown && node -e \"require('node:fs').copyFileSync('src/client.js', 'lib/client.js')\""
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",
