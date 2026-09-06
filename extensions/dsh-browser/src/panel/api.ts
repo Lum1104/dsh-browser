@@ -39,6 +39,13 @@ interface RespondResultMessage {
   error?: { code: string; message: string }
 }
 
+interface SettingsResultMessage {
+  type: 'settings.result'
+  id: string
+  ok: boolean
+  error?: { message?: unknown }
+}
+
 interface StatusMessage {
   type: 'status'
   state: BridgeState
@@ -82,7 +89,7 @@ interface SessionResumeHintMessage {
   sessionId: string | null
 }
 
-type BackgroundMessage = RpcResultMessage | RespondResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | SelectionMessage | SessionResumeHintMessage
+type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | SelectionMessage | SessionResumeHintMessage
 
 /** Structured gateway failure retained for product-level error handling. */
 export class PanelRpcError extends Error {
@@ -135,6 +142,10 @@ export function connectPanel(): PanelApi {
     reject: (error: Error) => void
     timer: ReturnType<typeof setTimeout>
   }>()
+  const pendingSettings = new Map<string, {
+    resolve: () => void
+    reject: (error: Error) => void
+  }>()
   const pendingRebinds = new Map<string, {
     resolve: () => void
     reject: (error: Error) => void
@@ -180,6 +191,16 @@ export function connectPanel(): PanelApi {
           ?? (getUiLocale() === 'zh' ? '回答提交失败' : 'Failed to send the answer')))
         break
       }
+      case 'settings.result': {
+        const entry = pendingSettings.get(msg.id)
+        if (entry === undefined) return
+        pendingSettings.delete(msg.id)
+        if (msg.ok) entry.resolve()
+        else entry.reject(new Error(typeof msg.error?.message === 'string'
+          ? msg.error.message
+          : (getUiLocale() === 'zh' ? '保存设置失败' : 'Failed to save settings')))
+        break
+      }
       case 'status':
         for (const listener of statusListeners) listener(msg.state, msg.caps)
         break
@@ -221,7 +242,7 @@ export function connectPanel(): PanelApi {
     return cause instanceof Error ? cause : new Error(fallback)
   }
 
-  function failAll(error: Error, preserve?: { kind: 'rpc' | 'respond' | 'rebind'; id: string }): void {
+  function failAll(error: Error, preserve?: { kind: 'rpc' | 'respond' | 'rebind' | 'settings'; id: string }): void {
     for (const [id, entry] of pending) {
       if (preserve?.kind === 'rpc' && preserve.id === id) continue
       entry.reject(error)
@@ -237,6 +258,11 @@ export function connectPanel(): PanelApi {
       if (preserve?.kind === 'rebind' && preserve.id === id) continue
       entry.reject(error)
       pendingRebinds.delete(id)
+    }
+    for (const [id, entry] of pendingSettings) {
+      if (preserve?.kind === 'settings' && preserve.id === id) continue
+      entry.reject(error)
+      pendingSettings.delete(id)
     }
   }
 
@@ -272,7 +298,7 @@ export function connectPanel(): PanelApi {
   function invalidate(
     stale: chrome.runtime.Port,
     error: Error,
-    preserve?: { kind: 'rpc' | 'respond' | 'rebind'; id: string },
+    preserve?: { kind: 'rpc' | 'respond' | 'rebind' | 'settings'; id: string },
   ): void {
     if (port !== stale) return
     port = null
@@ -287,7 +313,7 @@ export function connectPanel(): PanelApi {
    */
   function send(
     message: unknown,
-    preserve?: { kind: 'rpc' | 'respond' | 'rebind'; id: string },
+    preserve?: { kind: 'rpc' | 'respond' | 'rebind' | 'settings'; id: string },
   ): Promise<void> {
     const current = port
     if (current !== null) {
@@ -411,7 +437,19 @@ export function connectPanel(): PanelApi {
       return send({ type: 'session.active', sessionId, isNew })
     },
     updateSettings(next) {
-      return send({ type: 'settings', settings: next })
+      const id = crypto.randomUUID()
+      return new Promise<void>((resolve, reject) => {
+        const entry = { resolve, reject }
+        pendingSettings.set(id, entry)
+        void send(
+          { type: 'settings', id, settings: next },
+          { kind: 'settings', id },
+        ).catch((cause: unknown) => {
+          if (pendingSettings.get(id) !== entry) return
+          pendingSettings.delete(id)
+          reject(connectionError(cause))
+        })
+      })
     },
     requestStatus() {
       return send({ type: 'request-status' })

@@ -103,6 +103,13 @@ describe('registerBrowserTools', () => {
     await run('browser_open_tab', { url: 'https://example.com/new' })
     expect(requestTool).toHaveBeenLastCalledWith('browser_open_tab', { url: 'https://example.com/new' }, exec.signal, 1_000)
 
+    await run('browser_list_tabs', {})
+    expect(requestTool).toHaveBeenLastCalledWith('browser_list_tabs', {}, exec.signal, 1_000)
+    await run('browser_follow_tab', { tabId: 17 })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_follow_tab', { tabId: 17 }, exec.signal, 1_000)
+    await run('browser_close_tab', { tabId: 18 })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_close_tab', { tabId: 18 }, exec.signal, 1_000)
+
     for (const name of ['browser_back', 'browser_forward', 'browser_reload'] as const) {
       await run(name, {})
       expect(requestTool).toHaveBeenLastCalledWith(name, {}, exec.signal, 1_000)
@@ -172,7 +179,7 @@ describe('registerBrowserTools', () => {
       const params = byName.get(name)!.parameters as { properties: { frame?: { type?: unknown } } }
       expect(params.properties.frame?.type).toBe('number')
     }
-    for (const name of ['browser_snapshot', 'browser_navigate', 'browser_open_tab', 'browser_back', 'browser_forward', 'browser_reload']) {
+    for (const name of ['browser_snapshot', 'browser_navigate', 'browser_open_tab', 'browser_list_tabs', 'browser_follow_tab', 'browser_close_tab', 'browser_back', 'browser_forward', 'browser_reload']) {
       const params = byName.get(name)!.parameters as { properties: { frame?: unknown } }
       expect(params.properties.frame).toBeUndefined()
     }

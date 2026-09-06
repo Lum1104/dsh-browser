@@ -72,6 +72,8 @@ export interface PanelCopy {
     sharingAuto: string
     sharingAsk: string
     sharingOff: string
+    unrestrictedBrowserAccess: string
+    unrestrictedBrowserAccessHelp: string
     approvalNotifications: string
     approvalNotificationsHelp: string
     autoResumeSession: string
@@ -244,6 +246,9 @@ const EN: PanelCopy = {
       browser_scroll: 'Scroll page',
       browser_navigate: 'Open page',
       browser_open_tab: 'Open new tab',
+      browser_list_tabs: 'List open tabs',
+      browser_follow_tab: 'Follow tab',
+      browser_close_tab: 'Close tab',
       browser_back: 'Go back',
       browser_forward: 'Go forward',
       browser_reload: 'Reload page',
@@ -297,6 +302,8 @@ const EN: PanelCopy = {
     sharingAuto: 'Share automatically (default)',
     sharingAsk: 'Ask every time',
     sharingOff: 'Off',
+    unrestrictedBrowserAccess: 'Allow unrestricted browser control',
+    unrestrictedBrowserAccessHelp: 'Let the model read every HTTP(S) page, inspect all open tab titles and URLs, and perform actions—including following and closing tabs—without confirmation. Browser-protected page content remains inaccessible.',
     approvalNotifications: 'Browser approval notifications',
     approvalNotificationsHelp: 'Notify you when an approval arrives while the side panel is closed',
     autoResumeSession: "Resume this page's conversation",
@@ -469,6 +476,9 @@ const ZH: PanelCopy = {
       browser_scroll: '滚动页面',
       browser_navigate: '打开页面',
       browser_open_tab: '打开新标签页',
+      browser_list_tabs: '列出标签页',
+      browser_follow_tab: '跟随标签页',
+      browser_close_tab: '关闭标签页',
       browser_back: '返回上一页',
       browser_forward: '前进下一页',
       browser_reload: '刷新页面',
@@ -522,6 +532,8 @@ const ZH: PanelCopy = {
     sharingAuto: '自动共享（默认）',
     sharingAsk: '每次询问',
     sharingOff: '关闭',
+    unrestrictedBrowserAccess: '允许模型完全控制浏览器',
+    unrestrictedBrowserAccessHelp: '模型无需确认即可读取所有 HTTP(S) 页面、查看全部已打开标签页的标题和链接，并执行包括跟随、关闭标签页在内的所有操作。浏览器受保护页面的内容仍不可访问。',
     approvalNotifications: '浏览器审批通知',
     approvalNotificationsHelp: '侧栏关闭时收到审批请求，通过系统通知提醒你',
     autoResumeSession: '续接当前页面会话',

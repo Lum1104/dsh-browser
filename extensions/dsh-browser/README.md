@@ -16,6 +16,9 @@ The **browser-operation end** of dsh: the model reads and operates the browser p
 | Keys | `browser_press` | Enter/Tab/Escape/arrows etc. |
 | Scroll | `browser_scroll` | Viewport scrolling (up/down/top/bottom) |
 | Navigate | `browser_navigate` / `browser_open_tab` / `browser_back` / `browser_forward` / `browser_reload` | Navigation inside the controlled tab, or open a URL in a new tab and follow it |
+| List tabs | `browser_list_tabs` | List accessible tabs with stable IDs, titles, URLs, and active/controlled state |
+| Follow tab | `browser_follow_tab` | Bind later browser tools to a listed tab without activating it |
+| Close tab | `browser_close_tab` | Close a listed tab |
 | Read region | `browser_get_text` | Lazy-loaded content / partial text |
 | Wait | `browser_wait` | Page load and render-settle detection |
 | Chat with images | `session.prompt` / `session.attachment` | Host-gated image selection, image-only sends, and durable history previews |
@@ -74,7 +77,7 @@ The recommended zero-configuration command does not require Git or a local clone
    ./scripts/install.sh
    ```
 
-   Windows checkouts run `.\scripts\install.ps1` instead.
+   Windows checkouts run `.\scripts\install.ps1` instead. Paths containing spaces are supported: the installer uses a profile-local directory junction instead of putting the absolute checkout path in pnpm's link spec.
 
 2. **Start dsh with the bridge plugin mounted**. Use either the workspace-pinned runtime:
 
@@ -84,10 +87,10 @@ The recommended zero-configuration command does not require Git or a local clone
 
    From a clone, run `pnpm start` in the repository root instead.
 
-   Or, once published, the exact supported public runtime:
+   Or use the exact supported public runtime:
 
    ```sh
-   npx @deepseek-ai/dsh@0.1.2 web
+   npx @deepseek-ai/dsh@0.1.2-rc.1 web
    ```
 
    Both commands load the same bundle from the local `web` profile. Port 3080 is used by default; append `--port <port>` when it is occupied.
@@ -98,7 +101,7 @@ The recommended zero-configuration command does not require Git or a local clone
 
 3. **Use it**: open a normal `http://` or `https://` page and click the DeepSeek whale icon. Both builds auto-discover local dsh. Chrome loopback connections need no address or token; Firefox must be given the token from `~/.dsh/ext-bridge-token` because a `moz-extension://` UUID is not an add-on identity. Chat directly or click "Read page" first.
 
-Pages that were already open before extension installation or reload are instrumented automatically on the first action, so they do not require a manual refresh. Browser-internal and protected pages such as `chrome://` and the Chrome Web Store cannot be read or operated.
+Pages that were already open before extension installation or reload are instrumented automatically on the first action, so they do not require a manual refresh. Browser-internal and protected pages such as `chrome://` and the Chrome Web Store expose only tab metadata and browser-level HTTP(S) navigation, back, forward, and reload; their DOM cannot be read or operated.
 
 For extension-only development, load `extensions/dsh-browser/dist/` from `chrome://extensions`, or run `build:firefox` and load `extensions/dsh-browser/dist-firefox/manifest.json` from `about:debugging#/runtime/this-firefox`. Rebuild and reload after code changes.
 
@@ -111,6 +114,7 @@ For extension-only development, load `extensions/dsh-browser/dist/` from `chrome
 - **Privacy**: password/credit-card values always render as `••••` and never leave the page; accessible names never use a sensitive field's current value.
 - **Tab affinity**: prompt submission binds the active tab before the model starts working; a direct browser-tool call also performs the initial bind when needed. A manual tab/window switch pauses later tools and asks whether the assistant should stay on the original tab or follow the newly visible one. Staying permits explicit background operation without changing the user's visible tab; following resets page-reference state. A closed controlled tab fails closed until the user selects the current page, and a switch withdraws any open action approval.
 - **Proportional approval**: the default `auto` mode lets the model read the controlled tab without an extra prompt; `ask` restores per-read confirmation and `off` blocks reads. In `ask` mode, the read dialog can allow one read or persistently switch back to `auto`, which remains reversible in Settings. State-changing tools still fail closed and show their exact origin plus a redacted action summary. The user may deny, allow once, or trust one origin for the current side-panel session; temporary trust clears when the last panel closes or the service worker restarts. Permanent trust is managed explicitly in Settings. If the panel is closed, an approval remains pending for up to 60 seconds and, when enabled, a system notification opens the panel for review. The panel restores the requesting session before showing a session-scoped approval. Caller cancellation or bridge timeout withdraws any open approval before an action can run.
+- **Unrestricted control is explicit**: **Allow unrestricted browser control** becomes active only after the setting is saved successfully, then lets page reads, page actions, and tab list/follow/close operations run without confirmation. Calls capture their access mode when received, so enabling unrestricted control never retroactively elevates an existing restricted call. Disabling it takes effect immediately, cancels calls that have not dispatched an action, waits for already-dispatched browser operations to settle, and only then saves the restrictive setting. A rapid re-enable remains restricted until that revocation finishes, and concurrent saves persist in request order. Protected-page DOM content remains inaccessible.
 - **Conversation continuity**: reopening the panel resumes the most recently active browser conversation by default, falling back to the latest non-empty durable session before creating a new one. This can be disabled in Settings.
 
 ## Permissions

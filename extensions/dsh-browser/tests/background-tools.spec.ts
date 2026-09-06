@@ -10,8 +10,28 @@ import {
 const CALL: ToolCall = { id: 'tool-1', name: 'browser_snapshot', args: {} }
 const OK: ToolAnswer = { ok: true, result: { text: 'page' } }
 
+function managedTab(tabId: number, overrides: Partial<chrome.tabs.Tab> = {}): chrome.tabs.Tab {
+  return {
+    id: tabId,
+    windowId: 1,
+    index: tabId,
+    active: false,
+    highlighted: false,
+    pinned: false,
+    incognito: false,
+    selected: false,
+    discarded: false,
+    autoDiscardable: true,
+    groupId: -1,
+    url: `https://example.com/${tabId}`,
+    title: `Tab ${tabId}`,
+    ...overrides,
+  }
+}
+
 function mockChrome(options: {
-  tab?: { id?: number; url?: string }
+  tab?: Partial<chrome.tabs.Tab>
+  tabs?: chrome.tabs.Tab[]
   responses?: Array<unknown>
   injectionError?: Error
   frames?: Array<{ frameId: number; parentFrameId: number; documentId?: string; url: string }>
@@ -40,10 +60,23 @@ function mockChrome(options: {
   const executeScript = options.injectionError === undefined
     ? vi.fn(async () => [{ frameId: 0, result: undefined }])
     : vi.fn(async () => { throw options.injectionError })
-  const query = vi.fn(async () => options.tab === undefined ? [] : [options.tab])
+  const allTabs = () => options.tabs ?? (options.tab === undefined ? [] : [options.tab as chrome.tabs.Tab])
+  const query = vi.fn(async (queryInfo?: chrome.tabs.QueryInfo) => Object.keys(queryInfo ?? {}).length === 0
+    ? allTabs()
+    : (options.tab === undefined ? [] : [options.tab]))
+  const get = vi.fn(async (tabId: number) => {
+    const found = allTabs().find((tab) => tab.id === tabId)
+    if (found === undefined) throw new Error(`No tab with id: ${tabId}`)
+    return { ...found }
+  })
+  const update = vi.fn(async (_tabId: number, changes: chrome.tabs.UpdateProperties) => ({ ...options.tab, ...changes }))
+  const goBack = vi.fn(async () => undefined)
+  const goForward = vi.fn(async () => undefined)
+  const reload = vi.fn(async () => undefined)
+  const remove = vi.fn(async () => undefined)
   const getAllFrames = vi.fn(async () => currentFrames())
   vi.stubGlobal('chrome', {
-    tabs: { query, sendMessage },
+    tabs: { query, get, sendMessage, update, goBack, goForward, reload, remove },
     scripting: { executeScript },
     webNavigation: { getAllFrames },
     runtime: {
@@ -62,7 +95,7 @@ function mockChrome(options: {
       listener({ type: 'DSH_CONTENT_READY' }, { tab: { id: tabId }, frameId, documentId } as chrome.runtime.MessageSender)
     }
   }
-  return { emitContentReady, executeScript, getAllFrames, query, sendMessage }
+  return { emitContentReady, executeScript, get, getAllFrames, goBack, goForward, query, reload, remove, sendMessage, update }
 }
 
 afterEach(() => {
@@ -115,30 +148,190 @@ describe('dispatchToolCall', () => {
     }, { documentId: 'document-7' })
   })
 
-  it('does not attempt injection on Chrome internal pages', async () => {
+  it('does not retry or roll back a dispatched action when its response port closes', async () => {
     const chromeMock = mockChrome({
-      tab: { id: 8, url: 'chrome://extensions' },
-      responses: [new Error('no receiver')],
+      tab: { id: 7, url: 'https://example.com/form' },
+      responses: [new Error('The message port closed before a response was received.')],
     })
+    const commitAction = vi.fn()
+    const rollbackActionCommit = vi.fn()
 
-    await expect(dispatchToolCall(CALL, 'auto')).resolves.toMatchObject({
+    const answer = await dispatchToolCall(
+      { id: 'port-closed', name: 'browser_press', args: { key: 'Enter' } },
+      'auto',
+      undefined,
+      async () => 'approved',
+      undefined,
+      undefined,
+      undefined,
+      { unrestrictedAccess: true, commitAction, rollbackActionCommit },
+    )
+
+    expect(answer).toMatchObject({
       ok: false,
-      error: { code: 'content-unavailable', message: expect.stringContaining('http or https') },
+      error: { code: 'content-unavailable', message: expect.stringContaining('operation was dispatched') },
     })
+    expect(commitAction).toHaveBeenCalledOnce()
+    expect(rollbackActionCommit).not.toHaveBeenCalled()
+    expect(chromeMock.sendMessage).toHaveBeenCalledOnce()
     expect(chromeMock.executeScript).not.toHaveBeenCalled()
   })
 
-  it('returns a clear error when recovery injection is blocked', async () => {
+  it('returns browser-level metadata without injecting into Chrome internal pages', async () => {
+    const chromeMock = mockChrome({
+      tab: { id: 8, windowId: 3, title: 'Extensions', url: 'chrome://extensions' },
+      responses: [new Error('no receiver')],
+    })
+
+    const answer = await dispatchToolCall(CALL, 'auto')
+    expect(answer).toMatchObject({ ok: true })
+    expect((answer.result as { text: string }).text).toContain('browser-level controls')
+    expect((answer.result as { text: string }).text).toContain('chrome://extensions')
+    expect((answer.result as { text: string }).text).toContain('Title: Extensions')
+    expect((answer.result as { text: string }).text).toContain('Window ID: 3')
+    expect((answer.result as { text: string }).text).toContain('UNTRUSTED_PAGE_CONTENT')
+    expect(chromeMock.sendMessage).not.toHaveBeenCalled()
+    expect(chromeMock.executeScript).not.toHaveBeenCalled()
+  })
+
+  it('falls back to browser-level metadata when recovery injection is blocked', async () => {
     mockChrome({
       tab: { id: 9, url: 'https://chromewebstore.google.com/detail/example' },
-      responses: [new Error('no receiver')],
+      responses: [new Error('Could not establish connection. Receiving end does not exist.')],
       injectionError: new Error('Cannot access contents of the page'),
     })
 
-    await expect(dispatchToolCall(CALL, 'auto')).resolves.toMatchObject({
+    const answer = await dispatchToolCall(CALL, 'auto')
+    expect(answer).toMatchObject({ ok: true })
+    expect((answer.result as { text: string }).text).toContain('browser-level controls')
+    expect((answer.result as { text: string }).text).toContain('chromewebstore.google.com')
+  })
+
+  it('uses browser-level navigation, history, and reload on protected pages', async () => {
+    const chromeMock = mockChrome({ tab: { id: 8, url: 'chrome://newtab/' } })
+    const commitAction = vi.fn()
+    await expect(dispatchToolCall(
+      { id: 'navigate-protected', name: 'browser_navigate', args: { url: 'https://example.com/path' } },
+      'auto',
+      undefined,
+      async () => 'approved',
+      undefined,
+      undefined,
+      undefined,
+      { unrestrictedAccess: false, commitAction },
+    )).resolves.toMatchObject({ ok: true })
+    expect(chromeMock.update).toHaveBeenCalledWith(8, { url: 'https://example.com/path' })
+
+    for (const [name, operation] of [
+      ['browser_back', chromeMock.goBack],
+      ['browser_forward', chromeMock.goForward],
+      ['browser_reload', chromeMock.reload],
+    ] as const) {
+      await expect(dispatchToolCall(
+        { id: name, name, args: {} },
+        'auto',
+        undefined,
+        async () => 'approved',
+        undefined,
+        undefined,
+        undefined,
+        { unrestrictedAccess: false, commitAction },
+      )).resolves.toMatchObject({ ok: true })
+      expect(operation).toHaveBeenCalledWith(8)
+    }
+    expect(commitAction).toHaveBeenCalledTimes(4)
+    expect(chromeMock.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('rejects DOM actions on protected pages before requesting approval', async () => {
+    const chromeMock = mockChrome({ tab: { id: 8, url: 'about:config' } })
+    const authorize = vi.fn(async () => 'approved' as const)
+
+    await expect(dispatchToolCall(
+      { id: 'click-protected', name: 'browser_click', args: { index: 1 } },
+      'auto', undefined, authorize,
+    )).resolves.toMatchObject({
       ok: false,
-      error: { code: 'content-unavailable', message: expect.stringContaining('protected pages') },
+      error: { code: 'content-unavailable', message: expect.stringContaining('DOM is protected') },
     })
+    expect(authorize).not.toHaveBeenCalled()
+    expect(chromeMock.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('lists, follows, and closes selected tabs without activating them', async () => {
+    const tabs = [
+      managedTab(11, { active: true, title: 'Inbox', url: 'https://mail.example/inbox' }),
+      managedTab(12, { windowId: 2, title: 'Docs', url: 'https://docs.example/guide' }),
+    ]
+    const chromeMock = mockChrome({ tabs })
+    const authorize = vi.fn(async () => 'approved' as const)
+    const followTab = vi.fn(async () => undefined)
+    const commitAction = vi.fn()
+    const context = { unrestrictedAccess: false, controlledTabId: 11, followTab, commitAction }
+
+    const listed = await dispatchToolCall(
+      { id: 'list-tabs', name: 'browser_list_tabs', args: {} },
+      'auto', undefined, authorize, undefined, undefined, undefined, context,
+    )
+    expect((listed.result as { text: string }).text).toContain('UNTRUSTED_PAGE_CONTENT')
+    expect((listed.result as { text: string }).text).toContain('https://docs.example/guide')
+    expect((listed.result as { text: string }).text).toContain('"controlled": true')
+
+    await expect(dispatchToolCall(
+      { id: 'follow-tab', name: 'browser_follow_tab', args: { tabId: 12 } },
+      'auto', undefined, authorize, undefined, undefined, undefined, context,
+    )).resolves.toMatchObject({ ok: true })
+    expect(followTab).toHaveBeenCalledWith(expect.objectContaining({ id: 12 }))
+    expect(chromeMock.update).not.toHaveBeenCalled()
+
+    await expect(dispatchToolCall(
+      { id: 'close-tab', name: 'browser_close_tab', args: { tabId: 12 } },
+      'auto', undefined, authorize, undefined, undefined, undefined, context,
+    )).resolves.toMatchObject({ ok: true })
+    expect(chromeMock.get).toHaveBeenCalledTimes(4)
+    expect(chromeMock.remove).toHaveBeenCalledWith(12)
+    expect(commitAction).toHaveBeenCalledTimes(2)
+  })
+
+  it('skips sharing blocks and approval prompts only in unrestricted mode', async () => {
+    const authorize = vi.fn(async () => 'denied' as const)
+    mockChrome({ tab: { id: 8, url: 'https://example.com/' }, tabs: [managedTab(8)] })
+
+    await expect(dispatchToolCall(
+      CALL, 'off', undefined, authorize, undefined, undefined, undefined,
+      { unrestrictedAccess: true },
+    )).resolves.toMatchObject({ ok: true })
+    await expect(dispatchToolCall(
+      { id: 'list-unrestricted', name: 'browser_list_tabs', args: {} },
+      'ask', undefined, authorize, undefined, undefined, undefined,
+      { unrestrictedAccess: true },
+    )).resolves.toMatchObject({ ok: true })
+    await expect(dispatchToolCall(
+      { id: 'navigate-unrestricted', name: 'browser_navigate', args: { url: 'https://docs.example/' } },
+      'ask', undefined, authorize, undefined,
+      { id: 9, url: 'chrome://newtab/' }, undefined,
+      { unrestrictedAccess: true },
+    )).resolves.toMatchObject({ ok: true })
+    expect(authorize).not.toHaveBeenCalled()
+  })
+
+  it('does not follow a tab that navigates while approval is pending', async () => {
+    const target = managedTab(12, { url: 'https://docs.example/guide' })
+    const followTab = vi.fn(async () => undefined)
+    mockChrome({ tabs: [target] })
+
+    await expect(dispatchToolCall(
+      { id: 'follow-navigated', name: 'browser_follow_tab', args: { tabId: 12 } },
+      'auto', undefined, async () => {
+        target.url = 'https://bank.example/transfer'
+        return 'approved'
+      }, undefined, undefined, undefined,
+      { unrestrictedAccess: false, followTab },
+    )).resolves.toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining('navigated while approval was pending') },
+    })
+    expect(followTab).not.toHaveBeenCalled()
   })
 
   it('keeps the page-sharing privacy boundary ahead of tab access', async () => {
@@ -275,9 +468,20 @@ describe('dispatchToolCall', () => {
     await dispatchToolCall(CALL, 'auto')
     chromeMock.sendMessage.mockClear()
 
-    const answer = await dispatchToolCall(call, 'ask', undefined, async () => 'approved')
+    const commitAction = vi.fn()
+    const answer = await dispatchToolCall(
+      call,
+      'ask',
+      undefined,
+      async () => 'approved',
+      undefined,
+      undefined,
+      undefined,
+      { unrestrictedAccess: false, commitAction },
+    )
 
     expect(answer).toEqual({ ok: true, result: { text: 'Clicked [2].' } })
+    expect(commitAction).toHaveBeenCalledOnce()
     expect(chromeMock.sendMessage).toHaveBeenCalledWith(34, {
       type: 'DSH_ACTION',
       action: 'browser_click',
@@ -592,6 +796,7 @@ describe('dispatchOpenTab', () => {
     })
 
     const bindCreatedTab = vi.fn(() => true)
+    const commitAction = vi.fn()
     const open = dispatchOpenTab(
       { id: 'open-1', name: 'browser_open_tab', args: { url: 'https://docs.example/' } },
       9,
@@ -601,6 +806,7 @@ describe('dispatchOpenTab', () => {
       undefined,
       bindCreatedTab,
       () => true,
+      commitAction,
     )
     await vi.waitFor(() => { expect(runtimeListeners.size).toBe(1) })
     expect(create).toHaveBeenCalledWith({ active: true, windowId: 9 })
@@ -625,6 +831,7 @@ describe('dispatchOpenTab', () => {
     }
     const answer = await open
     expect(bindCreatedTab).toHaveBeenCalledOnce()
+    expect(commitAction).toHaveBeenCalledOnce()
     expect(remove).not.toHaveBeenCalled()
     expect(answer.ok).toBe(true)
     expect((answer.result as { text: string }).text).toContain('Opened a new tab')

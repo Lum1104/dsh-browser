@@ -381,7 +381,9 @@ if (-not $Root) { Install-RemoteWorkspace }
 
 $Ext = Join-Path $Root 'extensions\dsh-browser'
 $Plugin = Join-Path $Root 'packages\browser\bridge-browser'
+$WebProfileDir = Join-Path $DshHomeDir 'profiles\web'
 $WebProfileManifest = Join-Path $DshHomeDir 'profiles\web\package.json'
+$DshCli = Join-Path $Root 'node_modules\@deepseek-ai\dsh\lib\bin.js'
 
 Assert-Command 'pnpm' "未找到 pnpm；请先启用 Corepack 或安装 pnpm。" "pnpm was not found; enable Corepack or install pnpm first."
 Assert-Command 'node' "未找到 Node.js；请先安装受支持的 Node.js 版本。" "Node.js was not found; install a supported Node.js version first."
@@ -393,17 +395,53 @@ Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', $B
   -FailZh "桥插件构建失败。" -FailEn "The bridge plugin build failed."
 
 Write-Step 2 "注册到本机 web profile" "Register with the local web profile"
+# Initialize through dsh without forwarding a package path through cmd.exe.
+if (-not (Test-Path -LiteralPath $WebProfileManifest -PathType Leaf)) {
+  Invoke-Quiet -WorkingDirectory $Root -Command 'node' `
+    -Arguments @($DshCli, 'plugin', '--profile', 'web', 'install') `
+    -FailZh "初始化 web profile 失败。" -FailEn "Initializing the web profile failed."
+}
+
 if (Test-ProfileDependency -Manifest $WebProfileManifest -PackageName $LegacyPlugin) {
-  Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' `
-    -Arguments @('exec', 'dsh', 'plugin', '--profile', 'web', 'remove', $LegacyPlugin) `
+  Invoke-Quiet -WorkingDirectory $WebProfileDir -Command 'pnpm' `
+    -Arguments @('remove', '-w', $LegacyPlugin) `
     -FailZh "移除旧插件失败。" -FailEn "Removing the legacy plugin failed."
 }
-# pnpm accepts forward slashes on Windows, and they keep the backslashes in a Windows path
-# from being read as escapes inside the link: specifier.
-$LinkTarget = $Plugin.Replace('\', '/')
-Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' `
-  -Arguments @('exec', 'dsh', 'plugin', '--profile', 'web', 'add', '-w', "$BridgePlugin@link:$LinkTarget") `
+
+# A profile-local junction keeps the link spec free of absolute Windows paths.
+# This avoids cmd.exe splitting a checkout path that contains spaces.
+$ProfileSourceLink = Join-Path $WebProfileDir '.dsh-browser-source'
+$DesiredTarget = (Resolve-Path -LiteralPath $Plugin).ProviderPath
+if (Test-Path -LiteralPath $ProfileSourceLink) {
+  $SourceItem = Get-Item -LiteralPath $ProfileSourceLink -Force
+  if (-not ($SourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+    Stop-Install `
+      "$ProfileSourceLink 已存在且不是目录联接；请移动该路径后重试。" `
+      "$ProfileSourceLink exists and is not a directory junction; move it and retry."
+  }
+  $ExistingTarget = [System.IO.Path]::GetFullPath([string]$SourceItem.Target)
+  if ($ExistingTarget -ne $DesiredTarget) {
+    Remove-Item -LiteralPath $ProfileSourceLink -Force
+    New-Item -ItemType Junction -Path $ProfileSourceLink -Target $DesiredTarget | Out-Null
+  }
+} else {
+  New-Item -ItemType Junction -Path $ProfileSourceLink -Target $DesiredTarget | Out-Null
+}
+
+Invoke-Quiet -WorkingDirectory $WebProfileDir -Command 'pnpm' `
+  -Arguments @('add', '-w', 'link:./.dsh-browser-source') `
   -FailZh "注册桥插件失败。" -FailEn "Registering the bridge plugin failed."
+
+# The direct pnpm registration above bypasses dsh's bundle-roster update.
+$ProfileManifest = Get-Content -LiteralPath $WebProfileManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+$Bundles = @($ProfileManifest.dsh.profile.bundles) | Where-Object { $_ -ne $LegacyPlugin }
+if ($Bundles -notcontains $BridgePlugin) { $Bundles += $BridgePlugin }
+$ProfileManifest.dsh.profile.bundles = $Bundles
+$ProfileJson = ($ProfileManifest | ConvertTo-Json -Depth 20) + "`n"
+[System.IO.File]::WriteAllText(
+  $WebProfileManifest,
+  $ProfileJson,
+  (New-Object System.Text.UTF8Encoding $false))
 
 Write-Step 3 "构建 Chrome 扩展" "Build the Chrome extension"
 Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', 'dsh-browser-extension', 'run', 'build') `
@@ -475,6 +513,6 @@ Write-Pair "• 扩展会自动发现本机 dsh，无需填写地址或 token" "
 $QuotedRoot = "'" + $Root.Replace("'", "''") + "'"
 Write-Host ("• 启动固定版本：cd {0}; pnpm start" -f $QuotedRoot)
 Write-Host ("   Start the pinned version: cd {0}; pnpm start" -f $QuotedRoot)
-Write-Pair "• 0.1.2 发布后也可启动精确版本：npx @deepseek-ai/dsh@0.1.2 web" "Or, once published, start the exact supported version: npx @deepseek-ai/dsh@0.1.2 web"
+Write-Pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.1.2-rc.1 web" "Or start the pinned version directly: npx @deepseek-ai/dsh@0.1.2-rc.1 web"
 Write-Host ''
 Write-Pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/Lum1104/dsh-browser" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/Lum1104/dsh-browser"

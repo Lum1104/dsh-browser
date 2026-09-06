@@ -191,6 +191,23 @@ describe('TabAffinityController', () => {
     expect(affinity.resolveTarget()).toMatchObject({ kind: 'target', tab: { tabId: 2 } })
   })
 
+  it('rebinds control to a listed background tab without changing the active tab', () => {
+    const affinity = new TabAffinityController()
+    affinity.observeActive(tab(1))
+    affinity.bindInitial(tab(1), 'session-1')
+
+    expect(affinity.rebindControlled(tab(2), 'session-1')).toBe(true)
+    expect(affinity.snapshot()).toMatchObject({
+      status: 'background',
+      controlled: { tabId: 2 },
+      active: { tabId: 1 },
+    })
+    expect(affinity.resolveTarget('session-1')).toMatchObject({ kind: 'target', tab: { tabId: 2 } })
+
+    affinity.observeActive(tab(3))
+    expect(affinity.snapshot().status).toBe('handoff')
+  })
+
   it('does not silently rebind after the controlled tab closes', () => {
     const affinity = new TabAffinityController()
     affinity.observeActive(tab(1))

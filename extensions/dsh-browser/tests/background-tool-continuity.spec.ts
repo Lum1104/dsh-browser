@@ -198,26 +198,26 @@ describe('tool-driven session checkpoints', () => {
     await call('snapshot', 'browser_snapshot')
     expect(storedUrlKey(sessionData)).toBe('https://example.com/start')
 
-    let finishCancelled!: () => void
+    let finishCommitted!: () => void
     action = async () => await new Promise((resolve) => {
-      finishCancelled = () => resolve({ ok: true, result: { text: 'navigated' } })
+      finishCommitted = () => resolve({ ok: true, result: { text: 'navigated' } })
     })
     socket.receive({
       t: 'tool.call',
-      id: 'cancelled',
+      id: 'committed',
       name: 'browser_navigate',
       args: { url: 'https://example.com/target' },
       expiresAt: Date.now() + 10_000,
       sessionId: 'session-live',
     })
-    await vi.waitFor(() => { expect(finishCancelled).toBeTypeOf('function') })
-    currentTab = browserTab('https://example.com/cancelled')
-    socket.receive({ t: 'tool.cancel', id: 'cancelled' })
-    finishCancelled()
+    await vi.waitFor(() => { expect(finishCommitted).toBeTypeOf('function') })
+    currentTab = browserTab('https://example.com/committed')
+    socket.receive({ t: 'tool.cancel', id: 'committed' })
+    finishCommitted()
     await vi.waitFor(() => {
-      expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'cancelled', ok: false }))
+      expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'committed', ok: true }))
     })
-    expect(storedUrlKey(sessionData)).toBe('https://example.com/start')
+    await vi.waitFor(() => { expect(storedUrlKey(sessionData)).toBe('https://example.com/committed') })
 
     action = async () => {
       currentTab = browserTab('https://example.com/success?step=2#done')

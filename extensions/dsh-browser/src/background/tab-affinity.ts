@@ -236,6 +236,24 @@ export class TabAffinityController {
     return true
   }
 
+  /** Explicitly control an existing tab without changing the browser's active tab. */
+  rebindControlled(tab: AffinityTab, sessionId?: string): boolean {
+    const sid = sessionId?.trim()
+    this.controlled = { ...tab }
+    this.keptActiveTabId = this.active !== null && this.active.tabId !== tab.tabId
+      ? this.active.tabId
+      : null
+    this.pinned = false
+    this.hasBound = true
+    this.lost = false
+    if (sid !== undefined && sid !== '') {
+      this.sessionTabs.set(sid, { ...tab })
+      this.focusedSessionId = sid
+    }
+    this.revision += 1
+    return true
+  }
+
   /** Rehydrate a still-live controlled tab after an MV3 worker restart. */
   restoreControlled(tab: AffinityTab): boolean {
     if (this.controlled !== null || this.hasBound || this.lost) return false

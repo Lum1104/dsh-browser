@@ -16,6 +16,9 @@ dsh 的**浏览器操作端**：让模型直接读取并操作你在浏览器里
 | 按键 | `browser_press` | Enter/Tab/Escape/方向键等 |
 | 滚动 | `browser_scroll` | 视口滚动（up/down/top/bottom） |
 | 导航 | `browser_navigate` / `browser_open_tab` / `browser_back` / `browser_forward` / `browser_reload` | 受控标签页内跳转，或新开标签页并跟随 |
+| 列出标签页 | `browser_list_tabs` | 列出可访问标签页的稳定 ID、标题、URL 和活动/受控状态 |
+| 跟随标签页 | `browser_follow_tab` | 将后续浏览器工具绑定到已列出的标签页，而不激活该标签页 |
+| 关闭标签页 | `browser_close_tab` | 关闭已列出的标签页 |
 | 读区域 | `browser_get_text` | 懒加载内容 / 局部文本 |
 | 等待 | `browser_wait` | 页面加载与渲染稳定检测 |
 | 图片对话 | `session.prompt` / `session.attachment` | 按宿主能力启用图片选择、纯图片发送和持久历史预览 |
@@ -74,7 +77,7 @@ pnpm --filter dsh-browser-extension run test
    ./scripts/install.sh
    ```
 
-   Windows checkout 请运行 `.\scripts\install.ps1`。
+   Windows checkout 请运行 `.\scripts\install.ps1`。路径可以包含空格：安装器通过 profile 内的目录联接注册插件，不会把 checkout 的绝对路径写入 pnpm link 规格。
 
 2. **启动 dsh 并挂载桥插件**。可以使用 workspace 固定的运行时：
 
@@ -84,10 +87,10 @@ pnpm --filter dsh-browser-extension run test
 
    如果使用 clone，请改为在仓库根目录运行 `pnpm start`。
 
-   或在正式发布后使用受支持的精确公开版本：
+   或使用受支持的精确公开版本：
 
    ```sh
-   npx @deepseek-ai/dsh@0.1.2 web
+   npx @deepseek-ai/dsh@0.1.2-rc.1 web
    ```
 
    两种命令都会从本机 `web` profile 加载同一个 bundle。默认端口为 3080；如被占用，可追加 `--port <port>`。
@@ -98,7 +101,7 @@ pnpm --filter dsh-browser-extension run test
 
 3. **开始使用**：打开普通的 `http://` 或 `https://` 页面，点击 DeepSeek 鲸鱼图标打开侧边栏。两个构建都会自动探测本机 dsh。Chrome 回环连接无需地址或 Token；Firefox 的 `moz-extension://` UUID 不能证明扩展身份，必须在设置中填入 `~/.dsh/ext-bridge-token`。可以直接对话，或先点「读取页面」。
 
-页面即使在扩展安装或重载之前已经打开，也会在第一次操作时自动补加载内容脚本，无需手动刷新。`chrome://`、Chrome Web Store 等浏览器内置或受保护页面不支持读取和操作。
+页面即使在扩展安装或重载之前已经打开，也会在第一次操作时自动补加载内容脚本，无需手动刷新。`chrome://`、Chrome Web Store 等浏览器内置或受保护页面只提供标签页元数据，以及浏览器级 HTTP(S) 导航、后退、前进和刷新；不能读取或操作其 DOM。
 
 如果只开发扩展，Chrome 从 `chrome://extensions` 加载 `extensions/dsh-browser/dist/`；Firefox 运行 `build:firefox` 后，从 `about:debugging#/runtime/this-firefox` 加载 `extensions/dsh-browser/dist-firefox/manifest.json`。代码更新后需重新构建并重新加载。
 
@@ -111,6 +114,7 @@ pnpm --filter dsh-browser-extension run test
 - **隐私**：密码/卡号字段的值永远以 `••••` 呈现，绝不回传；可访问名称从不使用敏感字段的当前值。
 - **标签页绑定**：提交提示时会在模型开始工作前绑定活动标签页；如果直接调用浏览器工具，也会在需要时完成首次绑定。手动切换标签页或窗口后，后续工具会暂停，并询问助手继续原页面还是跟随当前页。选择原页面后允许后台操作，但不会改变用户正在看的页面；选择跟随后会重置页面引用状态。受控页关闭后失败关闭，直到用户选择当前页；切页还会撤销尚未完成的操作审批。
 - **分级审批**：默认「自动共享」允许模型按需读取受控标签页而不额外弹窗；「每次询问」可恢复逐次读取确认，「关闭」会阻断读取。在「每次询问」模式下，读取弹窗可以仅允许一次，也可以持久切回自动读取，之后仍可在设置中关闭。状态变更工具仍然失败关闭，并显示实际 origin 和脱敏动作摘要；用户可拒绝、仅允许一次，或只在当前侧栏会话中信任单个 origin。最后一个侧栏关闭或 Service Worker 重启会清空临时信任；永久信任需在设置中显式管理。侧栏关闭时，审批最多保留 60 秒；启用通知后，系统通知可把用户带回侧栏。会话级审批只会在其所属会话恢复完成后显示。调用方取消或桥接超时时，会先撤销尚未完成的审批，过期动作不会继续执行。
+- **完全控制需显式开启**：**允许模型完全控制浏览器**只有设置保存成功后才会生效，启用后页面读取、页面操作以及标签页列出/跟随/关闭均无需确认。调用在收到时固定其访问模式，因此开启完全控制不会追溯提升已经开始的受限调用。关闭会立即生效：取消尚未下发操作的调用，等待已经下发到浏览器的操作完成，再保存限制设置。快速重新开启也会在旧权限撤销完成前保持受限，并发保存会按请求顺序落盘。受保护页面的 DOM 内容始终不可访问。
 - **会话续接**：重新打开侧栏时默认恢复最近活跃的浏览器会话；若该会话不可用，则恢复最新的非空持久会话，最后才创建新会话。可在设置中关闭。
 
 ## 权限说明

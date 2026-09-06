@@ -9,7 +9,7 @@
  * Panel port protocol (chrome.runtime.connect, name "dsh-panel"):
  *   panel → bg: { type: 'rpc', id, method, payload }
  *   panel → bg: { type: 'respond', id, rpcId, result }
- *   panel → bg: { type: 'settings', settings: Partial<Settings> }
+ *   panel → bg: { type: 'settings', id, settings: Partial<Settings> }
  *   panel → bg: { type: 'session.active', sessionId }
  *   panel → bg: { type: 'approval.response', id, decision }
  *   panel → bg: { type: 'tab-affinity.response', revision, decision, sessionId }
@@ -19,6 +19,7 @@
  *   panel → bg: { type: 'request-status' }
  *   bg → panel: { type: 'rpc.result', id, ok, result? | error? }
  *   bg → panel: { type: 'respond.result', id, ok, result? | error? }
+ *   bg → panel: { type: 'settings.result', id, ok, error? }
  *   bg → panel: { type: 'status', state: BridgeState, caps? }
  *   bg → panel: { type: 'event', frame: ServerFrame }
  *   bg → panel: { type: 'approval.request', request }
@@ -45,6 +46,7 @@ import {
   dispatchOpenTab,
   dispatchToolCall,
   isNavigationCandidateTool,
+  isTabManagementTool,
   resetTabSnapshot,
   type ToolAnswer,
   type ToolCall,
@@ -83,6 +85,8 @@ export interface Settings {
   bridgeUrl: string
   token: string
   sharePageContent: 'ask' | 'auto' | 'off'
+  /** Allow every browser operation without an approval prompt. */
+  unrestrictedBrowserAccess: boolean
   /** Origins whose state-changing actions may run without another prompt. */
   trustedActionOrigins: string[]
   /** Show an OS notification when no side panel can display an approval. */
@@ -96,6 +100,7 @@ const SETTINGS_DEFAULTS: Settings = {
   bridgeUrl: '',
   token: '',
   sharePageContent: 'auto',
+  unrestrictedBrowserAccess: false,
   trustedActionOrigins: [],
   approvalNotifications: true,
   autoResumeSession: true,
@@ -156,6 +161,10 @@ type StoredTabAffinity =
   | { lost: true; sessionTabs?: Record<string, AffinityTab>; focusedSessionId?: string }
 
 let settings: Settings = { ...SETTINGS_DEFAULTS }
+let unrestrictedAccessActive = SETTINGS_DEFAULTS.unrestrictedBrowserAccess
+let unrestrictedAccessRevision = 0
+let unrestrictedRevocation: Promise<void> | undefined
+let settingsPersistence = Promise.resolve()
 let caps: BridgeCaps | null = null
 let bridge: BridgeClient | null = null
 let rpc: ReturnType<typeof createRpc> | null = null
@@ -177,13 +186,31 @@ const pageSessionContexts = new PageSessionContextTracker({
 void chrome.storage.session.remove(LEGACY_RECENT_SESSION_STORAGE_KEY).catch(() => {})
 /** Ephemeral allowlist: cleared when the last side panel closes or this worker restarts. */
 const sessionTrustedActionOrigins = new Set<string>()
-/** Tool calls that can still be withdrawn by a bridge `tool.cancel` frame. */
-const activeToolCalls = new Map<string, AbortController>()
+/** Tool calls that are either withdrawable or completing an already-dispatched action. */
+interface ActiveToolCall {
+  controller: AbortController
+  unrestrictedAccess: boolean
+  committed: boolean
+  revocationRequested: boolean
+  settled: Promise<void>
+  settle: () => void
+}
+
+const activeToolCalls = new Map<string, ActiveToolCall>()
+/** Disconnection drops result ownership, but dispatched operations must still settle before revocation. */
+const unsettledToolCalls = new Set<ActiveToolCall>()
 let lastPersistedAffinity: string | undefined
 let affinityPersistence = Promise.resolve()
 /** Per-session snapshot refreshes preserve prompt ordering without cross-session cancellation. */
 const sessionSnapshotRefreshes = new Map<string, Promise<void>>()
-const activeFollowRefreshes = new Map<string, AbortController>()
+interface ActiveFollowRefresh {
+  controller: AbortController
+  unrestrictedAccess: boolean
+  settled: Promise<void>
+  settle: () => void
+}
+
+const activeFollowRefreshes = new Map<string, ActiveFollowRefresh>()
 const TAB_AFFINITY_REBIND_TIMEOUT_MS = 10_000
 
 class TabAffinityRebindError extends Error {
@@ -234,8 +261,41 @@ async function loadSettings(): Promise<Settings> {
 }
 
 async function persistSettings(next: Partial<Settings>): Promise<void> {
-  settings = normalizeSettings({ ...settings, ...next })
-  await chrome.storage.local.set({ [STORAGE_KEY]: settings })
+  const changesUnrestrictedAccess = typeof next.unrestrictedBrowserAccess === 'boolean'
+  const accessRevision = changesUnrestrictedAccess ? ++unrestrictedAccessRevision : unrestrictedAccessRevision
+  const updated = normalizeSettings({ ...settings, ...next })
+  const revokesUnrestrictedAccess = settings.unrestrictedBrowserAccess && !updated.unrestrictedBrowserAccess
+  settings = updated
+  if (!updated.unrestrictedBrowserAccess) unrestrictedAccessActive = false
+  syncSelectionWatch()
+  let accessTransition: Promise<void> | undefined
+  if (revokesUnrestrictedAccess) {
+    let trackedRevocation!: Promise<void>
+    trackedRevocation = revokeUnrestrictedAccess().finally(() => {
+      if (unrestrictedRevocation !== trackedRevocation) return
+      unrestrictedRevocation = undefined
+      syncSelectionWatch()
+    })
+    unrestrictedRevocation = trackedRevocation
+    accessTransition = trackedRevocation
+  } else if (unrestrictedRevocation !== undefined) {
+    accessTransition = unrestrictedRevocation
+  }
+  const persisted = updated
+  const write = settingsPersistence.then(async () => {
+    await accessTransition
+    await chrome.storage.local.set({ [STORAGE_KEY]: persisted })
+  })
+  settingsPersistence = write.catch(() => {})
+  await write
+  if (changesUnrestrictedAccess
+    && accessRevision === unrestrictedAccessRevision
+    && settings.unrestrictedBrowserAccess
+    && persisted.unrestrictedBrowserAccess
+    && unrestrictedRevocation === undefined) {
+    unrestrictedAccessActive = true
+    syncSelectionWatch()
+  }
 }
 
 function normalizeSettings(candidate: Settings): Settings {
@@ -248,6 +308,7 @@ function normalizeSettings(candidate: Settings): Settings {
   return {
     ...candidate,
     sharePageContent,
+    unrestrictedBrowserAccess: candidate.unrestrictedBrowserAccess === true,
     trustedActionOrigins: trusted,
     approvalNotifications: candidate.approvalNotifications !== false,
     autoResumeSession: candidate.autoResumeSession !== false,
@@ -258,6 +319,7 @@ function normalizeSettings(candidate: Settings): Settings {
 let settingsLoaded = false
 const settingsReady = loadSettings().then((loaded) => {
   settings = loaded
+  unrestrictedAccessActive = loaded.unrestrictedBrowserAccess
   settingsLoaded = true
 })
 
@@ -334,7 +396,12 @@ function resetSelectionDedupe(sources: readonly SelectionSource[]): void {
 function selectionSharingEnabled(): boolean {
   // Until storage answers, `settings` still holds the defaults. Reporting the
   // default here would arm watchers for a user whose saved choice is `off`.
-  return settingsLoaded && settings.sharePageContent !== 'off'
+  return settingsLoaded && (unrestrictedAccessEnabled() || settings.sharePageContent !== 'off')
+}
+
+/** Whether unrestricted access is enabled and no earlier grant is still being revoked. */
+function unrestrictedAccessEnabled(): boolean {
+  return unrestrictedAccessActive && unrestrictedRevocation === undefined
 }
 
 /** Page selections are captured only in a window with an open panel. */
@@ -531,7 +598,7 @@ function observeActiveSummary(summary: AffinityTab): void {
   if (previousStatus !== 'handoff' && tabAffinity.snapshot().status === 'handoff') {
     const focused = tabAffinity.focusedSession()
     if (focused !== null) {
-      activeFollowRefreshes.get(focused)?.abort()
+      activeFollowRefreshes.get(focused)?.controller.abort()
       cancelPendingApprovals(focused)
     } else {
       cancelPendingApprovals()
@@ -726,7 +793,7 @@ function affinityFailure(kind: 'handoff' | 'lost' | 'missing'): ToolAnswer {
 }
 
 /** Resolve one stable tab target without allowing a manual switch to drift it. */
-async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab, 'id' | 'url' | 'windowId'> | ToolAnswer> {
+async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab, 'id' | 'url' | 'title' | 'windowId'> | ToolAnswer> {
   await affinityReady
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const resolution = tabAffinity.resolveTarget(sessionId)
@@ -749,7 +816,7 @@ async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab,
       const affectedSessions = tabAffinity.sessionIdsForTab(resolution.tab.tabId)
       if (tabAffinity.removeTab(resolution.tab.tabId)) {
         for (const sid of affectedSessions) {
-          activeFollowRefreshes.get(sid)?.abort()
+          activeFollowRefreshes.get(sid)?.controller.abort()
           cancelPendingApprovals(sid)
         }
         persistTabAffinity()
@@ -807,8 +874,10 @@ async function authorizeToolCall(
   signal: AbortSignal,
   windowId: number,
   sessionId?: string,
+  unrestrictedAccess: boolean = unrestrictedAccessEnabled(),
 ): Promise<ApprovalAuthorization> {
   if (signal.aborted) return 'cancelled'
+  if (unrestrictedAccess) return 'approved'
   if (actionCoveredByTrustedOrigins(
     prompt,
     sessionTrustedActionOrigins,
@@ -840,9 +909,17 @@ async function authorizeToolCall(
 
 /** Capture the newly controlled tab and seed it into this session's next Agent step. */
 async function refreshFollowedPage(sessionId: string, tabId: number): Promise<void> {
-  activeFollowRefreshes.get(sessionId)?.abort()
+  activeFollowRefreshes.get(sessionId)?.controller.abort()
   const controller = new AbortController()
-  activeFollowRefreshes.set(sessionId, controller)
+  const unrestrictedAccess = unrestrictedAccessEnabled()
+  let settle!: () => void
+  const activeRefresh: ActiveFollowRefresh = {
+    controller,
+    unrestrictedAccess,
+    settled: new Promise<void>((resolve) => { settle = resolve }),
+    settle: () => { settle() },
+  }
+  activeFollowRefreshes.set(sessionId, activeRefresh)
   try {
     const target = await resolveToolTab(sessionId)
     if ('ok' in target || target.id !== tabId || controller.signal.aborted) return
@@ -851,12 +928,13 @@ async function refreshFollowedPage(sessionId: string, tabId: number): Promise<vo
       : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars }
     const answer = await dispatchToolCall(
       { id: crypto.randomUUID(), name: 'browser_snapshot', args: {} },
-      settings.sharePageContent,
+      unrestrictedAccess ? 'auto' : settings.sharePageContent,
       budget,
-      (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, sessionId),
+      (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, sessionId, unrestrictedAccess),
       controller.signal,
       target,
       () => target.id !== undefined && tabAffinity.allowsTarget(target.id, sessionId),
+      { unrestrictedAccess },
     )
     if (!answer.ok || controller.signal.aborted || !tabAffinity.allowsTarget(tabId, sessionId)) return
     if (typeof answer.result !== 'object' || answer.result === null) return
@@ -864,7 +942,8 @@ async function refreshFollowedPage(sessionId: string, tabId: number): Promise<vo
     if (typeof snapshot !== 'string' || snapshot.trim() === '') return
     await gatewayRpc(BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, { sessionId, snapshot })
   } finally {
-    if (activeFollowRefreshes.get(sessionId) === controller) activeFollowRefreshes.delete(sessionId)
+    activeRefresh.settle()
+    if (activeFollowRefreshes.get(sessionId) === activeRefresh) activeFollowRefreshes.delete(sessionId)
   }
 }
 
@@ -914,12 +993,22 @@ async function rebindTabAffinityToActive(signal: AbortSignal, sessionId?: string
       : 'The current tab could not be determined; the existing session and tab binding were left unchanged')
   }
 
+  commitTabAffinityRebind(summary, sessionId)
+}
+
+/** Commit one explicit tab handoff and clear stale element references. */
+function commitTabAffinityRebind(
+  summary: AffinityTab,
+  sessionId?: string,
+  mode: 'active' | 'background' = 'active',
+): void {
   const previousControlledTabId = tabAffinity.snapshot().controlled?.tabId
   if (sessionId !== undefined) {
-    activeFollowRefreshes.get(sessionId)?.abort()
+    activeFollowRefreshes.get(sessionId)?.controller.abort()
     cancelPendingApprovals(sessionId)
   }
-  tabAffinity.rebindActive(summary, sessionId)
+  if (mode === 'active') tabAffinity.rebindActive(summary, sessionId)
+  else tabAffinity.rebindControlled(summary, sessionId)
   if (sessionId !== undefined) {
     pageSessionContexts.bind(sessionId, { id: summary.tabId, ...summary })
   }
@@ -929,6 +1018,13 @@ async function rebindTabAffinityToActive(signal: AbortSignal, sessionId?: string
   resetTabSnapshot(summary.tabId)
   persistTabAffinity()
   broadcastTabAffinity()
+}
+
+async function followModelSelectedTab(tab: chrome.tabs.Tab, sessionId?: string): Promise<void> {
+  const summary = summarizeTab(tab)
+  if (summary === null) throw new Error('the selected tab has no usable identifier')
+  await pageSessionContexts.ready
+  commitTabAffinityRebind(summary, sessionId, 'background')
 }
 
 /** 把协商的快照预算下发到受控页（尚未绑定时使用活动页）。 */
@@ -954,45 +1050,98 @@ async function pushBudgetToControlledTab(negotiated: BridgeCaps): Promise<void> 
 /** Route one tool.call frame to the user-approved controlled tab. */
 function routeToolCall(call: ToolCall): void {
   if (bridge === null) return
-  activeToolCalls.get(call.id)?.abort()
+  activeToolCalls.get(call.id)?.controller.abort()
   const controller = new AbortController()
-  activeToolCalls.set(call.id, controller)
+  const unrestrictedAccess = unrestrictedAccessEnabled()
+  let settle!: () => void
+  const activeCall: ActiveToolCall = {
+    controller,
+    unrestrictedAccess,
+    committed: false,
+    revocationRequested: false,
+    settled: new Promise<void>((resolve) => { settle = resolve }),
+    settle: () => { settle() },
+  }
+  activeToolCalls.set(call.id, activeCall)
+  unsettledToolCalls.add(activeCall)
+  const commitAction = (): void => { activeCall.committed = true }
+  const rollbackActionCommit = (): void => {
+    activeCall.committed = false
+    if (activeCall.revocationRequested) controller.abort()
+  }
   const expiryTimer = call.expiresAt === undefined
     ? undefined
-    : setTimeout(() => { controller.abort() }, Math.max(0, call.expiresAt - Date.now()))
+    : setTimeout(() => {
+        if (!activeCall.committed) controller.abort()
+      }, Math.max(0, call.expiresAt - Date.now()))
   const budget = caps === null
     ? undefined
     : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars }
-  void (call.name === 'browser_open_tab'
+  const sharePageContent = unrestrictedAccess ? 'auto' : settings.sharePageContent
+  const managementDispatch = async (): Promise<ToolAnswer> => {
+    await affinityReady
+    const affinity = tabAffinity.snapshot()
+    let windowId = affinity.active?.windowId ?? affinity.controlled?.windowId
+    if (windowId === undefined) {
+      try {
+        windowId = (await chrome.windows.getLastFocused()).id
+      } catch { /* approvals can still report unavailable without a focused window */ }
+    }
+    const controlledTabId = call.sessionId === undefined
+      ? affinity.controlled?.tabId
+      : tabAffinity.getSessionTab(call.sessionId)?.tabId
+    return dispatchToolCall(
+      call,
+      sharePageContent,
+      budget,
+      (prompt) => authorizeToolCall(prompt, controller.signal, windowId ?? 0, call.sessionId, unrestrictedAccess),
+      controller.signal,
+      undefined,
+      undefined,
+      {
+        unrestrictedAccess,
+        ...(controlledTabId === undefined ? {} : { controlledTabId }),
+        followTab: (tab) => followModelSelectedTab(tab, call.sessionId),
+        commitAction,
+        rollbackActionCommit,
+      },
+    )
+  }
+  void (isTabManagementTool(call.name)
+    ? managementDispatch()
+    : call.name === 'browser_open_tab'
     ? resolveOpenTabWindow(call.sessionId).then((target) => 'ok' in target
       ? target
       : dispatchOpenTab(
           call,
           target.windowId,
-          settings.sharePageContent,
+          sharePageContent,
           budget,
-          (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId),
+          (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess),
           controller.signal,
           (tab) => bindOpenedTab(tab, call.sessionId),
           (tabId) => tabAffinity.allowsTarget(tabId, call.sessionId),
+          commitAction,
         ))
     : resolveToolTab(call.sessionId).then((target) => 'ok' in target
       ? target
       : dispatchToolCall(
           call,
-          settings.sharePageContent,
+          sharePageContent,
           budget,
-          (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId),
+          (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess),
           controller.signal,
           target,
           () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
+          { unrestrictedAccess, commitAction, rollbackActionCommit },
         ))
   ).then(
     async (answer) => {
+      if (activeToolCalls.get(call.id) !== activeCall) return
       // A committed browser_open_tab already rebound affinity; prefer that
       // factual success over a generic cancel that would leave the model wrong.
       if (controller.signal.aborted && !(call.name === 'browser_open_tab' && answer.ok)) {
-        if (activeToolCalls.get(call.id) === controller) {
+        if (activeToolCalls.get(call.id) === activeCall) {
           bridge?.send({
             t: 'tool.result',
             id: call.id,
@@ -1004,6 +1153,7 @@ function routeToolCall(call: ToolCall): void {
       }
       if (answer.ok) {
         if (isNavigationCandidateTool(call.name)) await checkpointSessionPage(call.sessionId)
+        if (activeToolCalls.get(call.id) !== activeCall) return
         const socket = bridge
         if (socket === null) return
         socket.send({ t: 'tool.result', id: call.id, ok: true, result: answer.result })
@@ -1014,8 +1164,9 @@ function routeToolCall(call: ToolCall): void {
       }
     },
     (error: unknown) => {
+      if (activeToolCalls.get(call.id) !== activeCall) return
       if (controller.signal.aborted) {
-        if (activeToolCalls.get(call.id) === controller) {
+        if (activeToolCalls.get(call.id) === activeCall) {
           bridge?.send({
             t: 'tool.result',
             id: call.id,
@@ -1034,16 +1185,35 @@ function routeToolCall(call: ToolCall): void {
     },
   ).finally(() => {
     if (expiryTimer !== undefined) clearTimeout(expiryTimer)
-    if (activeToolCalls.get(call.id) === controller) activeToolCalls.delete(call.id)
+    unsettledToolCalls.delete(activeCall)
+    activeCall.settle()
+    if (activeToolCalls.get(call.id) === activeCall) activeToolCalls.delete(call.id)
   })
 }
 
 function cancelToolCall(id: string): void {
-  activeToolCalls.get(id)?.abort()
+  const call = activeToolCalls.get(id)
+  if (call !== undefined && !call.committed) call.controller.abort()
+}
+
+async function revokeUnrestrictedAccess(): Promise<void> {
+  const calls = [...unsettledToolCalls].filter((call) => call.unrestrictedAccess)
+  const refreshes = [...activeFollowRefreshes.values()].filter((refresh) => refresh.unrestrictedAccess)
+  for (const call of calls) {
+    call.revocationRequested = true
+    if (!call.committed) call.controller.abort()
+  }
+  for (const refresh of refreshes) refresh.controller.abort()
+  await Promise.allSettled([
+    ...calls.map(async (call) => { await call.settled }),
+    ...refreshes.map(async (refresh) => { await refresh.settled }),
+  ])
 }
 
 function cancelAllToolCalls(): void {
-  for (const controller of activeToolCalls.values()) controller.abort()
+  for (const call of activeToolCalls.values()) {
+    if (!call.committed) call.controller.abort()
+  }
   activeToolCalls.clear()
 }
 
@@ -1217,29 +1387,43 @@ chrome.runtime.onConnect.addListener((port) => {
         break
       }
       case 'settings': {
-        const settingsMsg = message as { settings: Partial<Settings> }
+        const settingsMsg = message as { id?: unknown; settings: Partial<Settings> }
+        const requestId = typeof settingsMsg.id === 'string' ? settingsMsg.id : undefined
         void settingsReady.then(async () => {
-          const previousConnection = { bridgeUrl: settings.bridgeUrl, token: settings.token }
-          await persistSettings(settingsMsg.settings)
-          syncSelectionWatch()
-          if (panelPorts.size > 0) {
-            await startBridge()
-            broadcastStatus()
-            return
+          try {
+            const previousConnection = { bridgeUrl: settings.bridgeUrl, token: settings.token }
+            await persistSettings(settingsMsg.settings)
+            const connectionChanged = settings.bridgeUrl !== previousConnection.bridgeUrl
+              || settings.token !== previousConnection.token
+            if (panelPorts.size > 0) {
+              if (connectionChanged) await startBridge()
+              broadcastStatus()
+            } else if (connectionChanged) {
+              // The settings write outlived its originating panel. Do not keep a
+              // healthy socket authenticated with stale connection settings: make
+              // the next explicit panel lease start from the persisted values.
+              bridgeStartRevision += 1
+              bridge?.stop()
+              bridge = null
+              rpc = null
+              caps = null
+              broadcastStatus()
+              disarmBridgeKeepalive()
+            }
+            if (requestId !== undefined) {
+              try { port.postMessage({ type: 'settings.result', id: requestId, ok: true }) } catch { /* port closed */ }
+            }
+          } catch (error: unknown) {
+            if (requestId === undefined) return
+            try {
+              port.postMessage({
+                type: 'settings.result',
+                id: requestId,
+                ok: false,
+                error: { message: error instanceof Error ? error.message : String(error) },
+              })
+            } catch { /* port closed */ }
           }
-          const connectionChanged = settings.bridgeUrl !== previousConnection.bridgeUrl
-            || settings.token !== previousConnection.token
-          if (!connectionChanged) return
-          // The settings write outlived its originating panel. Do not keep a
-          // healthy socket authenticated with stale connection settings: make
-          // the next explicit panel lease start from the persisted values.
-          bridgeStartRevision += 1
-          bridge?.stop()
-          bridge = null
-          rpc = null
-          caps = null
-          broadcastStatus()
-          disarmBridgeKeepalive()
         })
         break
       }
@@ -1464,7 +1648,7 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
     const affectedSessions = tabAffinity.sessionIdsForTab(removedTabId)
     if (!tabAffinity.replaceTab(removedTabId, addedTabId)) return
     for (const sid of affectedSessions) {
-      activeFollowRefreshes.get(sid)?.abort()
+      activeFollowRefreshes.get(sid)?.controller.abort()
       cancelPendingApprovals(sid)
     }
     resetTabSnapshot(removedTabId)
@@ -1487,7 +1671,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     const affectedSessions = tabAffinity.sessionIdsForTab(tabId)
     if (!tabAffinity.removeTab(tabId)) return
     for (const sid of affectedSessions) {
-      activeFollowRefreshes.get(sid)?.abort()
+      activeFollowRefreshes.get(sid)?.controller.abort()
       cancelPendingApprovals(sid)
     }
     persistTabAffinity()

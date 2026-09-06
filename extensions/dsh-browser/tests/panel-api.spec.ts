@@ -330,15 +330,17 @@ describe('panel protocol', () => {
 
   it('retries a message that a stale port synchronously refuses', async () => {
     vi.useFakeTimers()
+    vi.spyOn(crypto, 'randomUUID').mockReturnValue('12345678-1234-4234-8234-123456789abc')
     const first = {
       postMessage: vi.fn(() => { throw new Error('Attempting to use a disconnected port object') }),
       onMessage: { addListener: vi.fn() },
       onDisconnect: { addListener: vi.fn() },
     }
     const secondPost = vi.fn()
+    let secondReceive: ((message: unknown) => void) | undefined
     const second = {
       postMessage: secondPost,
-      onMessage: { addListener: vi.fn() },
+      onMessage: { addListener: vi.fn((listener: (message: unknown) => void) => { secondReceive = listener }) },
       onDisconnect: { addListener: vi.fn() },
     }
     const connect = vi.fn()
@@ -348,12 +350,49 @@ describe('panel protocol', () => {
     const api = connectPanel()
 
     const sent = api.updateSettings({ bridgeUrl: 'ws://127.0.0.1:3080' })
+    let saved = false
+    void sent.then(() => { saved = true })
     await vi.advanceTimersByTimeAsync(150)
-    await expect(sent).resolves.toBeUndefined()
+    expect(saved).toBe(false)
 
     expect(secondPost).toHaveBeenCalledWith({
       type: 'settings',
+      id: '12345678-1234-4234-8234-123456789abc',
       settings: { bridgeUrl: 'ws://127.0.0.1:3080' },
     })
+    secondReceive?.({
+      type: 'settings.result',
+      id: '12345678-1234-4234-8234-123456789abc',
+      ok: true,
+    })
+    await expect(sent).resolves.toBeUndefined()
+  })
+
+  it('waits for and surfaces the background settings result', async () => {
+    let receive: ((message: unknown) => void) | undefined
+    const postMessage = vi.fn()
+    const port = {
+      postMessage,
+      onMessage: { addListener: vi.fn((listener: (message: unknown) => void) => { receive = listener }) },
+      onDisconnect: { addListener: vi.fn() },
+    }
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn(() => port) } })
+    vi.spyOn(crypto, 'randomUUID').mockReturnValue('12345678-1234-4234-8234-123456789abd')
+    const api = connectPanel()
+
+    const pending = api.updateSettings({ unrestrictedBrowserAccess: false })
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'settings',
+      id: '12345678-1234-4234-8234-123456789abd',
+      settings: { unrestrictedBrowserAccess: false },
+    })
+    receive?.({
+      type: 'settings.result',
+      id: '12345678-1234-4234-8234-123456789abd',
+      ok: false,
+      error: { message: 'Storage is unavailable' },
+    })
+
+    await expect(pending).rejects.toThrow('Storage is unavailable')
   })
 })

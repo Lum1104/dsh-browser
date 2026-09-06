@@ -739,6 +739,7 @@ export function App(): React.JSX.Element {
         bridgeUrl: raw?.bridgeUrl ?? '',
         token: raw?.token ?? '',
         sharePageContent: raw?.sharePageContent ?? 'auto',
+        unrestrictedBrowserAccess: raw?.unrestrictedBrowserAccess ?? false,
         trustedActionOrigins: raw?.trustedActionOrigins ?? [],
         approvalNotifications: raw?.approvalNotifications ?? true,
         autoResumeSession: raw?.autoResumeSession ?? true,
@@ -746,7 +747,7 @@ export function App(): React.JSX.Element {
     })
   }, [])
 
-  // 每次连接重启（设置变更/断线重连）都新建会话。状态消息逐条监听：
+  // 每次连接重启（连接配置变更/断线重连）都新建会话。状态消息逐条监听：
   // React 会把 stopped/connecting 等瞬时状态合并进同一帧渲染，依赖渲染
   // 状态无法可靠观察到"连接已重置"，因此在这里按消息粒度判定。
   const [sessionEpoch, setSessionEpoch] = useState(0)
@@ -1655,6 +1656,7 @@ export function App(): React.JSX.Element {
             <small>{copy.settings.pageSharingHelp}</small>
             <select
               value={settings?.sharePageContent ?? 'auto'}
+              disabled={settings?.unrestrictedBrowserAccess ?? false}
               onChange={(e) => setSettings((prev) => prev === null ? prev : { ...prev, sharePageContent: e.target.value as PanelSettings['sharePageContent'] })}
             >
               <option value="auto">{copy.settings.sharingAuto}</option>
@@ -1664,6 +1666,21 @@ export function App(): React.JSX.Element {
           </label>
         </div>
         <div className="settings-panel preference-toggles">
+          <label className="setting-toggle">
+            <span className="setting-toggle-copy">
+              <strong>{copy.settings.unrestrictedBrowserAccess}</strong>
+              <small>{copy.settings.unrestrictedBrowserAccessHelp}</small>
+            </span>
+            <input
+              className="setting-toggle-input"
+              type="checkbox"
+              checked={settings?.unrestrictedBrowserAccess ?? false}
+              onChange={(event) => setSettings((current) => current === null
+                ? current
+                : { ...current, unrestrictedBrowserAccess: event.target.checked })}
+            />
+            <span className="setting-toggle-control" aria-hidden="true"><span /></span>
+          </label>
           <label className="setting-toggle">
             <span className="setting-toggle-copy">
               <strong>{copy.settings.approvalNotifications}</strong>
