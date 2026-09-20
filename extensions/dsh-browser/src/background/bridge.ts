@@ -4,7 +4,9 @@
  * exponential-backoff reconnects, and answers protocol pings.
  *
  * The reconnect policy mirrors the dsh GUI's own ConnectionController: base
- * 500ms, ×2 per attempt, capped at 10s, jittered 0.5–1×.
+ * 500ms, ×2 per attempt, capped at 10s, jittered 0.5–1×. After a streak of
+ * failed probes the optional `resolveUrl` hook may replace the target URL so
+ * Desktop random-port restarts can be followed without user action.
  *
  * @module
  */
@@ -29,9 +31,14 @@ export interface BridgeSinks {
 /** Resolve whether opening a WebSocket is expected to succeed. */
 type BridgeProbe = (url: string) => Promise<boolean>
 
+/** Re-discover a bridge URL after repeated probe failures. */
+export type BridgeResolveUrl = (shouldContinue: () => boolean) => Promise<string | undefined>
+
 const BACKOFF_BASE_MS = 500
 const BACKOFF_MAX_MS = 10_000
 const HELLO_ACK_TIMEOUT_MS = 5_000
+/** Probe failures before asking `resolveUrl` for a replacement address. */
+const REDISCOVER_AFTER_FAILURES = 3
 
 /**
  * Owns one WebSocket connection generation and the reconnect loop.
@@ -51,10 +58,16 @@ export class BridgeClient {
     private readonly probe: BridgeProbe = async () => true,
     /** Whether a disconnected client still has an active user-owned lease. */
     private readonly shouldReconnect: () => boolean = () => true,
+    private readonly resolveUrl?: BridgeResolveUrl,
   ) {}
 
   /** Current coarse state (mirrors the last emitted sink value). */
   state: BridgeState = 'stopped'
+
+  /** Active bridge WebSocket URL (may change after rediscovery). */
+  get currentUrl(): string {
+    return this.url
+  }
 
   /**
    * Connect (or reconnect) to the bridge. Idempotent: calling again with the
@@ -109,17 +122,31 @@ export class BridgeClient {
   }
 
   private async loop(generation: number): Promise<void> {
+    let failStreak = 0
     while (this.running && generation === this.generation) {
       if (!this.retryAllowed()) return
       const reachable = await this.probe(this.url).catch(() => false)
       if (!this.running || generation !== this.generation) return
       if (!this.retryAllowed()) return
       if (!reachable) {
+        failStreak += 1
+        if (failStreak >= REDISCOVER_AFTER_FAILURES && this.resolveUrl !== undefined) {
+          const next = await this.resolveUrl(() => this.running && generation === this.generation)
+          failStreak = 0
+          if (!this.running || generation !== this.generation) return
+          if (next !== undefined && next !== this.url) {
+            this.url = next
+            this.attempt = 0
+            this.emitState('connecting')
+            continue
+          }
+        }
         this.emitState('reconnecting')
         await this.waitBeforeRetry()
         continue
       }
 
+      failStreak = 0
       const socket = new WebSocket(this.url)
       this.ws = socket
       // A replacement is an ownership handoff, not a transient transport
