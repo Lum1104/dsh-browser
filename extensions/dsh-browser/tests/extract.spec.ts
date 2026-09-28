@@ -1,6 +1,14 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
-import { accessibleName, collectHiddenForms, collectInteractive, isVisible, mainText, truncate } from '../src/content/extract.ts'
+import {
+  accessibleName,
+  collectHiddenForms,
+  collectInteractive,
+  formControlLabel,
+  isVisible,
+  mainText,
+  truncate,
+} from '../src/content/extract.ts'
 
 describe('truncate', () => {
   it('cuts over-budget text and reports the cut count', () => {
@@ -59,6 +67,70 @@ describe('accessibleName', () => {
     expect(accessibleName(button)).toBe('提交')
     const span = document.createElement('span')
     expect(accessibleName(span)).toBe('span')
+  })
+
+  it('resolves multiple aria-labelledby IDs in order and ignores duplicates', () => {
+    document.body.innerHTML = `
+      <span id="a">名</span><span id="b">称</span>
+      <button aria-labelledby="a b a">x</button>
+    `
+    expect(accessibleName(document.querySelector('button')!)).toBe('名 称')
+  })
+
+  it('resolves shadow-scoped aria-labelledby without borrowing an outer ID', () => {
+    const outer = document.createElement('span')
+    outer.id = 'title'
+    outer.textContent = '外层'
+    document.body.appendChild(outer)
+
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const shadow = host.attachShadow({ mode: 'open' })
+    shadow.innerHTML = `
+      <span id="title">标题</span>
+      <button aria-labelledby="title">x</button>
+    `
+    expect(accessibleName(shadow.querySelector('button')!)).toBe('标题')
+  })
+
+  it('resolves shadow-scoped label[for]', () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const shadow = host.attachShadow({ mode: 'open' })
+    shadow.innerHTML = `
+      <label for="email">邮箱</label>
+      <input id="email" type="text" />
+    `
+    expect(accessibleName(shadow.querySelector('input')!)).toBe('邮箱')
+  })
+})
+
+describe('formControlLabel', () => {
+  it('resolves shadow-scoped aria-labelledby for a hidden textarea', () => {
+    const outer = document.createElement('span')
+    outer.id = 'title'
+    outer.textContent = '外层'
+    document.body.appendChild(outer)
+
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const shadow = host.attachShadow({ mode: 'open' })
+    shadow.innerHTML = `
+      <span id="title">标题</span>
+      <textarea id="note" aria-labelledby="title" style="width:0;height:0;opacity:0"></textarea>
+    `
+    expect(formControlLabel(shadow.querySelector('textarea')!)).toBe('标题')
+  })
+
+  it('resolves shadow-scoped label[for]', () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const shadow = host.attachShadow({ mode: 'open' })
+    shadow.innerHTML = `
+      <label for="role">项目角色</label>
+      <select id="role" style="display:none"><option>A</option></select>
+    `
+    expect(formControlLabel(shadow.querySelector('select')!)).toBe('项目角色')
   })
 })
 

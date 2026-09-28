@@ -123,6 +123,63 @@ export function truncate(text: string, max: number): { text: string; truncated: 
   return { text: `${text.slice(0, max)}…`, truncated: text.length - max }
 }
 
+/** CSS.escape with a fallback for environments that lack it (jsdom). */
+function cssEscape(value: string): string {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(value)
+  return value.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`)
+}
+
+/**
+ * Root that owns tree-scoped ID references for `el` (document or shadow root).
+ * Attribute ID refs and HTML label/control associations do not cross this boundary.
+ */
+function treeRoot(el: Element): Document | ShadowRoot {
+  const root = el.getRootNode()
+  return root instanceof ShadowRoot || root instanceof Document ? root : el.ownerDocument
+}
+
+/** Resolve one id inside `root` only — never borrow from another tree. */
+function getElementByIdInTree(root: Document | ShadowRoot, id: string): Element | null {
+  if (id === '') return null
+  if (root instanceof Document) return root.getElementById(id)
+  return root.querySelector(`#${cssEscape(id)}`)
+}
+
+/**
+ * Resolve `aria-labelledby` IDs in reference order within the control's own tree.
+ * Duplicate IDs after their first occurrence are ignored. No cross-shadow fallback.
+ */
+function labelledByText(el: Element): string | undefined {
+  const labelledBy = el.getAttribute('aria-labelledby')
+  if (labelledBy === null) return undefined
+  const root = treeRoot(el)
+  const seen = new Set<string>()
+  const parts: string[] = []
+  for (const rawId of labelledBy.trim().split(/\s+/)) {
+    if (rawId === '' || seen.has(rawId)) continue
+    seen.add(rawId)
+    const ref = getElementByIdInTree(root, rawId)
+    const refText = ref?.textContent
+    if (refText !== undefined && refText.trim() !== '') parts.push(clean(refText))
+  }
+  if (parts.length === 0) return undefined
+  return parts.join(' ')
+}
+
+/**
+ * Resolve an associated `<label for>` in the control's own tree (not the outer document).
+ */
+function labelForText(el: Element): string | undefined {
+  if (!(el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement)) {
+    return undefined
+  }
+  if (el.id === '') return undefined
+  const label = treeRoot(el).querySelector<HTMLLabelElement>(`label[for="${cssEscape(el.id)}"]`)
+  const labelText = label?.textContent
+  if (labelText === undefined || labelText.trim() === '') return undefined
+  return clean(labelText)
+}
+
 /**
  * The accessible name of an element, following the ARIA precedence chain
  * (aria-label → aria-labelledby → associated label → own text →
@@ -134,20 +191,13 @@ export function accessibleName(el: Element): string {
   const ariaLabel = el.getAttribute('aria-label')
   if (ariaLabel !== null && ariaLabel.trim() !== '') return truncate(clean(ariaLabel), MAX_ITEM_NAME_CHARS).text
 
-  const labelledBy = el.getAttribute('aria-labelledby')
-  if (labelledBy !== null) {
-    const ref = document.getElementById(labelledBy.split(/\s+/)[0] ?? '')
-    const refText = ref?.textContent
-    if (refText !== undefined && refText.trim() !== '') return truncate(clean(refText), MAX_ITEM_NAME_CHARS).text
-  }
+  const fromLabelledBy = labelledByText(el)
+  if (fromLabelledBy !== undefined) return truncate(fromLabelledBy, MAX_ITEM_NAME_CHARS).text
 
   const labelable = el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement
   if (labelable) {
-    if (el.id !== '') {
-      const label = el.ownerDocument.querySelector<HTMLLabelElement>(`label[for="${cssEscape(el.id)}"]`)
-      const labelText = label?.textContent
-      if (labelText !== undefined && labelText.trim() !== '') return truncate(clean(labelText), MAX_ITEM_NAME_CHARS).text
-    }
+    const fromLabelFor = labelForText(el)
+    if (fromLabelFor !== undefined) return truncate(fromLabelFor, MAX_ITEM_NAME_CHARS).text
     const wrappingLabelText = el.closest('label')?.textContent
     if (wrappingLabelText !== undefined && wrappingLabelText.trim() !== '') {
       return truncate(clean(wrappingLabelText), MAX_ITEM_NAME_CHARS).text
@@ -169,12 +219,6 @@ export function accessibleName(el: Element): string {
   }
 
   return el.tagName.toLowerCase()
-}
-
-/** CSS.escape with a fallback for environments that lack it (jsdom). */
-function cssEscape(value: string): string {
-  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(value)
-  return value.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`)
 }
 
 /** Default pointer-cursor check (inline styles work in jsdom; cascade may not). */
@@ -516,21 +560,14 @@ export function formControlLabel(el: Element): string {
   if (ariaLabel !== null && ariaLabel.trim() !== '') {
     return truncate(clean(ariaLabel), MAX_ITEM_NAME_CHARS).text
   }
-  const labelledBy = el.getAttribute('aria-labelledby')
-  if (labelledBy !== null) {
-    const ref = document.getElementById(labelledBy.split(/\s+/)[0] ?? '')
-    const refText = ref?.textContent
-    if (refText !== undefined && refText.trim() !== '') {
-      return truncate(clean(refText), MAX_ITEM_NAME_CHARS).text
-    }
+  const fromLabelledBy = labelledByText(el)
+  if (fromLabelledBy !== undefined) {
+    return truncate(fromLabelledBy, MAX_ITEM_NAME_CHARS).text
   }
   if (el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement) {
-    if (el.id !== '') {
-      const label = el.ownerDocument.querySelector<HTMLLabelElement>(`label[for="${cssEscape(el.id)}"]`)
-      const labelText = label?.textContent
-      if (labelText !== undefined && labelText.trim() !== '') {
-        return truncate(clean(labelText), MAX_ITEM_NAME_CHARS).text
-      }
+    const fromLabelFor = labelForText(el)
+    if (fromLabelFor !== undefined) {
+      return truncate(fromLabelFor, MAX_ITEM_NAME_CHARS).text
     }
     const wrapping = el.closest('label')?.textContent
     if (wrapping !== undefined && wrapping.trim() !== '') {
