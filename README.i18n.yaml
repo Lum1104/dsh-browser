@@ -1,5 +1,5 @@
 # Bilingual consistency record for the repository README files.
 # README.md is the default English page; README.zh.md is its Chinese counterpart.
 # Values are git blob hashes from the last confirmed-consistent review.
-README.md: c93ff03a45106e3eacd26ff9f2f37f848ce83607
-README.zh.md: a4566ac140b718edd9f0ca79306d3b29bb2f5362
+README.md: ebbf7f40daeaad7d88e8fbbb36432408d2e40698
+README.zh.md: c7a10e409a768cc84ea6988f884927f345b9425f

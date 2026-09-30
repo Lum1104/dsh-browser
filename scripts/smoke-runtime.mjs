@@ -17,6 +17,7 @@ const expectedVersion = JSON.parse(await readFile(join(root, 'package.json'), 'u
 const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
 const bridgeRequire = createRequire(join(bridge, 'package.json'))
 const { default: WebSocket } = await import(pathToFileURL(bridgeRequire.resolve('ws')).href)
+const { BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD } = await import(pathToFileURL(join(bridge, 'lib/protocol.js')).href)
 const temp = await mkdtemp(join(tmpdir(), 'dsh-runtime-smoke-'))
 const home = join(temp, 'home')
 const marker = join(temp, 'observation.json')
@@ -91,6 +92,8 @@ async function start(reopen) {
     `        sessionId: ${JSON.stringify(sessionId)}`,
     `        marker: ${JSON.stringify(marker)}`,
     `        reopen: ${reopen}`,
+    `        profileManifest: ${JSON.stringify(join(home, 'profiles/web/package.json'))}`,
+    `        expectedVersion: ${JSON.stringify(expectedVersion)}`,
     '',
   ].join('\n'))
   hostLog = ''
@@ -109,14 +112,6 @@ async function start(reopen) {
   assert.equal(response.status, 200)
   const config = await response.json()
   assert.equal(config.wsUrl, base.replace('http:', 'ws:') + '/ext/bridge')
-  // Inspect what the actual profile Loader resolves, not just workspace hoists.
-  const resolve = createRequire(join(home, 'profiles/web/package.json'))
-  for (const name of ['dsh-session-query', 'dsh-session-projection-cache']) {
-    const path = resolve.resolve(`@deepseek-ai/${name}/package.json`)
-    const { version } = JSON.parse(await readFile(path, 'utf8'))
-    console.log(`Host ${name}@${version}: ${path}`)
-    assert.equal(version, expectedVersion, `Profile resolved an incompatible ${name} at ${path}`)
-  }
   // Firefox-style origin requires a valid token even on loopback.
   socket = new WebSocket(config.wsUrl, { origin: 'moz-extension://runtime-smoke', handshakeTimeout: 10_000 })
   const frames = []
@@ -139,6 +134,10 @@ async function start(reopen) {
     socket.send(JSON.stringify({ t: 'rpc', id, method, payload }))
     const result = await frame(value => value.t === 'rpc.result' && value.id === id)
     assert.equal(result.ok, true, JSON.stringify(result))
+    if (method === BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD) {
+      assert.deepEqual(result.result, { accepted: true })
+      return result.result
+    }
     assert.equal(result.result?.result?.ok, true, JSON.stringify(result))
     return result.result.result.value
   }
@@ -174,8 +173,14 @@ try {
   assert.equal(created.sessionId, sessionId)
   assert.equal((await observation()).sessionId, sessionId)
   assert.ok((await rpc('session.list', {})).items.some(item => item.sessionId === sessionId))
+  await rpc(BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, { sessionId, snapshot: 'Page: runtime smoke snapshot' })
   const history = await rpc('session.history', { sessionId })
   assert.ok(Array.isArray(history.events))
+  const injected = history.events.flatMap(({ event }) => event.type === 'agent/inbox/spliced' ? event.data.inserted : [])
+    .find(message => message.source.kind === 'browser-context')
+  // DSH 0.2 producer-owned kinds use `browser-context` (not plugin:<package>).
+  assert.ok(injected, 'the live inbox must retain the producer-owned browser snapshot')
+  assert.ok(injected.content.some(block => block.type === 'text' && block.text.includes('runtime smoke snapshot')))
   const migrated = await rpc('session.history', { sessionId: legacySessionId })
   assert.ok(migrated.events.some(({ event }) => event.type === 'system/message'), 'V2 migration must insert the V3 system head')
   assert.equal(migrated.events.find(({ event }) => event.type === 'user/message')?.event.data.content[0].text, 'Saved browser conversation')
@@ -184,13 +189,22 @@ try {
   rpc = await start(true)
   assert.equal((await observation()).source, 'prepared')
   assert.ok((await rpc('session.list', {})).items.some(item => item.sessionId === sessionId))
-  assert.deepEqual((await rpc('session.history', { sessionId })).events, history.events)
+  const reopened = (await rpc('session.history', { sessionId })).events
+  assert.deepEqual(reopened.slice(0, history.events.length), history.events)
+  // Graceful disposal durably cancels the still-unclaimed browser snapshot.
+  // Its original V4 insertion must survive restart unchanged before that row.
+  const shutdown = reopened.slice(history.events.length)
+  assert.equal(shutdown.length, 1)
+  assert.equal(shutdown[0].event.type, 'agent/inbox/spliced')
+  assert.deepEqual(shutdown[0].event.data, {
+    target: 'next-step', start: 0, removedCount: 1, inserted: [], outcome: 'canceled',
+  })
   const reopenedLegacy = await rpc('session.history', { sessionId: legacySessionId })
   // Following a cold Session activates it after the opening snapshot and may
   // append seed/permission metadata. The migrated history prefix stays exact.
   assert.deepEqual(reopenedLegacy.events.slice(0, migrated.events.length), migrated.events)
   assert.deepEqual(await readFile(legacyFile), legacyBytes)
-  console.log('Real DSH smoke passed: discovery, token authentication, create/list/history, V2 migration, and prepared projections after restart')
+  console.log('Real DSH smoke passed: discovery, token authentication, create/list/history, V2 migration, V4 browser snapshots, and prepared projections after restart')
   succeeded = true
 } catch (error) {
   console.error(hostLog)
