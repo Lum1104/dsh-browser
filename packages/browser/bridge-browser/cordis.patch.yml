@@ -1,7 +1,7 @@
 # Browser bridge layer for the dsh `web` profile.
 #
 # `dsh plugin --profile web add` registers this package's `dsh.bundle`
-# manifest, so both the repository launcher and `npx @deepseek-ai/dsh@0.1.5-rc.2 web`
+# manifest, so both the repository launcher and `npx @deepseek-ai/dsh@0.2.0-rc.1 web`
 # apply this patch without an extra command-line option.
 #
 # On first boot the plugin generates a bearer token and persists it at
