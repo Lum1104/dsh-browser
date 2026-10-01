@@ -100,6 +100,24 @@ describe('approvalPromptForCall', () => {
     }), 'auto', FRAMES, 'en')?.summary).toBe(
       'Enter 6 characters in element [3] (the text is not shown in this dialog)',
     )
+    expect(approvalPromptForCall(call('browser_click', {
+      selector: '#work-list .add-btn',
+    }), 'auto', FRAMES, 'en')?.summary).toBe(
+      'Click element matching selector “#work-list .add-btn”',
+    )
+    expect(approvalPromptForCall(call('browser_click', {
+      text: '添加',
+    }), 'auto', FRAMES, 'en')?.summary).toBe(
+      'Click element with text “添加”',
+    )
+    expect(approvalPromptForCall(call('browser_focus', { index: 2 }), 'auto', FRAMES, 'en')?.summary)
+      .toBe('Focus element [2]')
+    expect(approvalPromptForCall(call('browser_upload', {
+      path: '/tmp/resume.pdf',
+      selector: '#file',
+    }), 'auto', FRAMES, 'en')?.summary).toBe(
+      'Upload “resume.pdf” to element matching selector “#file”',
+    )
     expect(approvalPromptForCall(call('browser_snapshot'), 'ask', FRAMES, 'en')?.summary)
       .toBe('Read the current page and accessible iframes')
   })

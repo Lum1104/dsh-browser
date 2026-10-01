@@ -37,6 +37,12 @@ describe('registerBrowserTools', () => {
     const result = await (tool.definition.execute as (args: unknown, e: { signal: AbortSignal }) => Promise<unknown>)({ index: 3, frame: 7 }, exec)
     expect(requestTool).toHaveBeenCalledWith('browser_click', { index: 3, frame: 7 }, exec.signal, 1_000)
     expect(result).toEqual({ text: 'ok' })
+
+    await (tool.definition.execute as (args: unknown, e: { signal: AbortSignal }) => Promise<unknown>)({ text: '添加', exact: true }, exec)
+    expect(requestTool).toHaveBeenLastCalledWith('browser_click', { text: '添加', exact: true }, exec.signal, 1_000)
+
+    await (tool.definition.execute as (args: unknown, e: { signal: AbortSignal }) => Promise<unknown>)({ selector: '.add-btn', nth: 0 }, exec)
+    expect(requestTool).toHaveBeenLastCalledWith('browser_click', { selector: '.add-btn', nth: 0 }, exec.signal, 1_000)
   })
 
   it('associates browser calls with the owning Agent session', async () => {
@@ -87,6 +93,13 @@ describe('registerBrowserTools', () => {
     expect(requestTool).toHaveBeenLastCalledWith('browser_type', { index: 2, text: 'hello', replace: true }, exec.signal, 1_000)
     await run('browser_type', { index: 2, frame: 4, text: 'inside frame' })
     expect(requestTool).toHaveBeenLastCalledWith('browser_type', { index: 2, frame: 4, text: 'inside frame' }, exec.signal, 1_000)
+    await run('browser_type', { selector: '#company', text: 'Acme', replace: true })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_type', { selector: '#company', text: 'Acme', replace: true }, exec.signal, 1_000)
+
+    await run('browser_focus', { index: 3 })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_focus', { index: 3 }, exec.signal, 1_000)
+    await run('browser_focus', { selector: '#name', frame: 1 })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_focus', { selector: '#name', frame: 1 }, exec.signal, 1_000)
 
     await run('browser_press', { key: 'Enter' })
     expect(requestTool).toHaveBeenLastCalledWith('browser_press', { key: 'Enter' }, exec.signal, 1_000)
@@ -150,7 +163,17 @@ describe('registerBrowserTools', () => {
       required?: string[]
     }
     expect(click.properties.index).toBeDefined()
-    expect(click.required).toContain('index')
+    expect(click.properties.selector).toBeDefined()
+    expect(click.properties.text).toBeDefined()
+    expect(click.required ?? []).not.toContain('index')
+
+    const type = registered.find(({ name }) => name === 'browser_type')!.definition.parameters as {
+      properties: Record<string, unknown>
+      required?: string[]
+    }
+    expect(type.properties.selector).toBeDefined()
+    expect(type.required).toContain('text')
+    expect(type.required ?? []).not.toContain('index')
   })
 
   it('declares cooperative timeoutMs on every tool', () => {
@@ -175,14 +198,14 @@ describe('registerBrowserTools', () => {
     const { ctx, bridge, registered } = makeHarness()
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
     const descriptionChars = registered.reduce((sum, { definition }) => sum + String(definition.description).length, 0)
-    expect(descriptionChars).toBeLessThan(1_500)
+    expect(descriptionChars).toBeLessThan(2_200)
   })
 
   it('exposes optional frame routing on frame-local tools only', () => {
     const { ctx, bridge, registered } = makeHarness()
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
     const byName = new Map(registered.map((entry) => [entry.name, entry.definition]))
-    for (const name of ['browser_click', 'browser_type', 'browser_press', 'browser_scroll', 'browser_get_text', 'browser_wait']) {
+    for (const name of ['browser_click', 'browser_type', 'browser_focus', 'browser_upload', 'browser_press', 'browser_scroll', 'browser_get_text', 'browser_wait']) {
       const params = byName.get(name)!.parameters as { properties: { frame?: { type?: unknown } } }
       expect(params.properties.frame?.type).toBe('number')
     }
@@ -208,5 +231,108 @@ describe('registerBrowserTools', () => {
     const tool = registered.find((r) => r.name === 'browser_click')!
     const output = tool.definition.output as { render: (args: unknown, value: unknown) => unknown }
     expect(output.render({}, { text: 'hello' })).toEqual([{ type: 'text', text: 'hello' }])
+  })
+})
+
+describe('prepareUploadPayload', () => {
+  it('reads an absolute file into base64 with size and extension checks', async () => {
+    const { mkdtemp, writeFile, rm } = await import('node:fs/promises')
+    const { join } = await import('node:path')
+    const { tmpdir } = await import('node:os')
+    const { prepareUploadPayload, MAX_UPLOAD_BYTES } = await import('../src/tools.ts')
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-upload-'))
+    try {
+      const path = join(dir, 'resume.txt')
+      await writeFile(path, 'hello-resume')
+      const payload = await prepareUploadPayload(path)
+      expect(payload.name).toBe('resume.txt')
+      expect(payload.mimeType).toBe('text/plain')
+      expect(Buffer.from(payload.dataBase64, 'base64').toString('utf8')).toBe('hello-resume')
+
+      await expect(prepareUploadPayload('relative.txt')).rejects.toThrow(/absolute/)
+      await expect(prepareUploadPayload(join(dir, 'nope.exe'))).rejects.toThrow(/Unsupported file extension/)
+      expect(MAX_UPLOAD_BYTES).toBeGreaterThan(0)
+
+      const oversized = join(dir, 'big.txt')
+      await writeFile(oversized, Buffer.alloc(MAX_UPLOAD_BYTES + 1, 0x61))
+      await expect(prepareUploadPayload(oversized)).rejects.toThrow(/upload limit/)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('accumulates short FileHandle.read returns until EOF', async () => {
+    const { readFileHandleBounded } = await import('../src/tools.ts')
+    const chunks = [Buffer.from('hel'), Buffer.from('lo-world'), Buffer.alloc(0)]
+    let call = 0
+    const handle = {
+      read: async (buf: Buffer, offset: number, length: number, _position: number | null) => {
+        const chunk = chunks[call] ?? Buffer.alloc(0)
+        call += 1
+        const n = Math.min(chunk.length, length)
+        if (n > 0) chunk.copy(buf, offset, 0, n)
+        return { bytesRead: n, buffer: buf }
+      },
+    }
+    const bytes = await readFileHandleBounded(handle, 64)
+    expect(bytes.toString('utf8')).toBe('hello-world')
+    expect(call).toBeGreaterThan(1)
+
+    const over = {
+      read: async (buf: Buffer, offset: number, length: number) => {
+        const n = Math.min(length, 8)
+        buf.fill(0x63, offset, offset + n)
+        return { bytesRead: n, buffer: buf }
+      },
+    }
+    await expect(readFileHandleBounded(over, 10)).rejects.toThrow(/upload limit/)
+  })
+
+  it('loads browser_upload through Host file read before the bridge call', async () => {
+    const { mkdtemp, writeFile, rm } = await import('node:fs/promises')
+    const { join } = await import('node:path')
+    const { tmpdir } = await import('node:os')
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-upload-tool-'))
+    try {
+      const path = join(dir, 'cv.pdf')
+      await writeFile(path, '%PDF-1.4')
+      const { ctx, bridge, requestTool, registered } = (() => {
+        const registered: { name: string; definition: Record<string, unknown> }[] = []
+        const ctx = {
+          tools: {
+            register: vi.fn((definition: { name: string }) => {
+              registered.push({ name: definition.name, definition: definition as Record<string, unknown> })
+              return () => {}
+            }),
+          },
+        } as unknown as Context
+        const requestTool = vi.fn(async () => ({ text: 'ok' }))
+        const bridge = { requestTool } as unknown as BridgeServer
+        return { ctx, bridge, requestTool, registered }
+      })()
+      registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+      const tool = registered.find((r) => r.name === 'browser_upload')!
+      const exec = { signal: new AbortController().signal }
+      await (tool.definition.execute as (args: unknown, e: { signal: AbortSignal }) => Promise<unknown>)({
+        path,
+        selector: '#file',
+        allowHidden: true,
+      }, exec)
+      expect(requestTool).toHaveBeenCalledWith(
+        'browser_upload',
+        expect.objectContaining({
+          path,
+          name: 'cv.pdf',
+          mimeType: 'application/pdf',
+          selector: '#file',
+          allowHidden: true,
+          dataBase64: Buffer.from('%PDF-1.4').toString('base64'),
+        }),
+        exec.signal,
+        1_000,
+      )
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })

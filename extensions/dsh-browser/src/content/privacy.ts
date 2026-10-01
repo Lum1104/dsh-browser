@@ -19,6 +19,12 @@ const SENSITIVE_PATTERNS = [
   /cvc/i,
   /secret/i,
   /pwd/i,
+  /otp/i,
+  /token/i,
+  /api[_-]?key/i,
+  /access[_-]?key/i,
+  /bearer/i,
+  /auth[_-]?code/i,
 ]
 
 /**

@@ -9,6 +9,8 @@ const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text'])
 const STATE_CHANGING_ACTIONS = new Set([
   'browser_click',
   'browser_type',
+  'browser_focus',
+  'browser_upload',
   'browser_press',
   'browser_navigate',
   'browser_open_tab',
@@ -110,15 +112,33 @@ function summarizeAction(call: ToolCall, locale: UiLocale): string {
   const frame = typeof call.args.frame === 'number' && call.args.frame !== 0
     ? localized(locale, `, iframe ${call.args.frame}`, `，iframe ${call.args.frame}`)
     : ''
-  const index = typeof call.args.index === 'number' ? call.args.index : '?'
   switch (call.name) {
-    case 'browser_click': return localized(locale, `Click element [${index}]${frame}`, `点击元素 [${index}]${frame}`)
+    case 'browser_click': return localized(
+      locale,
+      `Click ${describeTarget(call.args)}${frame}`,
+      `点击${describeTargetZh(call.args)}${frame}`,
+    )
     case 'browser_type': {
       const length = typeof call.args.text === 'string' ? call.args.text.length : 0
       return localized(
         locale,
-        `Enter ${length} characters in element [${index}]${frame} (the text is not shown in this dialog)`,
-        `向元素 [${index}] 输入 ${length} 个字符${frame}（文本内容不会显示在确认框）`,
+        `Enter ${length} characters in ${describeTarget(call.args)}${frame} (the text is not shown in this dialog)`,
+        `向${describeTargetZh(call.args)}输入 ${length} 个字符${frame}（文本内容不会显示在确认框）`,
+      )
+    }
+    case 'browser_focus': return localized(
+      locale,
+      `Focus ${describeTarget(call.args)}${frame}`,
+      `聚焦${describeTargetZh(call.args)}${frame}`,
+    )
+    case 'browser_upload': {
+      const name = typeof call.args.name === 'string' && call.args.name !== ''
+        ? call.args.name
+        : typeof call.args.path === 'string' ? basename(call.args.path) : 'file'
+      return localized(
+        locale,
+        `Upload “${safeInline(name)}” to ${describeTarget(call.args)}${frame}`,
+        `上传「${safeInline(name)}」到${describeTargetZh(call.args)}${frame}`,
       )
     }
     case 'browser_press': return localized(
@@ -150,6 +170,34 @@ function summarizeAction(call: ToolCall, locale: UiLocale): string {
     case 'browser_reload': return localized(locale, 'Reload the current page', '重新加载当前页面')
     default: return call.name
   }
+}
+
+function describeTarget(args: Record<string, unknown>): string {
+  if (typeof args.selector === 'string' && args.selector !== '') {
+    return `element matching selector “${safeInline(args.selector, 80)}”`
+  }
+  if (typeof args.text === 'string' && args.text !== '' && args.index === undefined && args.selector === undefined) {
+    // click-by-text only; type uses text as payload
+    return `element with text “${safeInline(args.text)}”`
+  }
+  const index = typeof args.index === 'number' ? args.index : '?'
+  return `element [${index}]`
+}
+
+function describeTargetZh(args: Record<string, unknown>): string {
+  if (typeof args.selector === 'string' && args.selector !== '') {
+    return `匹配选择器「${safeInline(args.selector, 80)}」的元素`
+  }
+  if (typeof args.text === 'string' && args.text !== '' && args.index === undefined && args.selector === undefined) {
+    return `文本为「${safeInline(args.text)}」的元素`
+  }
+  const index = typeof args.index === 'number' ? args.index : '?'
+  return `元素 [${index}]`
+}
+
+function basename(path: string): string {
+  const parts = path.split(/[/\\]/)
+  return parts[parts.length - 1] || path
 }
 
 function displayUrl(value: string, locale: UiLocale): string {

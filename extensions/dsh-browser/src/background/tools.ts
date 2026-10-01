@@ -51,6 +51,8 @@ const CONTENT_SCRIPT_FILE = 'content.js'
 const ACTION_DELTA_TOOLS = new Set([
   'browser_click',
   'browser_type',
+  'browser_focus',
+  'browser_upload',
   'browser_press',
   'browser_scroll',
   'browser_wait',
@@ -74,12 +76,20 @@ const TAB_NATIVE_TOOLS = new Set([
 const STATE_CHANGING_PAGE_TOOLS = new Set([
   'browser_click',
   'browser_type',
+  'browser_focus',
+  'browser_upload',
   'browser_press',
   'browser_scroll',
   'browser_navigate',
   'browser_back',
   'browser_forward',
   'browser_reload',
+])
+const ELEMENT_TARGET_TOOLS = new Set([
+  'browser_click',
+  'browser_type',
+  'browser_focus',
+  'browser_upload',
 ])
 /** Tools that operate on the browser tab collection rather than one page document. */
 export const TAB_MANAGEMENT_TOOL_NAMES = new Set([
@@ -807,7 +817,7 @@ function validateFrameTarget(call: ToolCall, frames: TabFrame[]): ToolAnswer | u
 }
 
 function validateElementTarget(call: ToolCall, tabId: number, frames: TabFrame[]): ToolAnswer | undefined {
-  if (call.name !== 'browser_click' && call.name !== 'browser_type') return undefined
+  if (!ELEMENT_TARGET_TOOLS.has(call.name)) return undefined
   const frameId = requestedFrame(call.args)
   const frame = frames.find((candidate) => candidate.frameId === frameId)
   const snapshotted = snapshotDocumentsByTab.get(tabId)?.get(frameId)

@@ -75,7 +75,7 @@ describe('navigation action responses', () => {
 
     await expect(runAction('browser_click', { index: 1 }, {
       ids,
-      budget: { maxItems: 20, maxForms: 10, maxChars: 2_000 },
+      budget: { maxItems: 20, maxForms: 10, maxHiddenForms: 40, maxChars: 2_000 },
     })).resolves.toMatchObject({
       text: expect.stringContaining('Clicked link [1]'),
       navigationPending: true,
@@ -94,7 +94,7 @@ describe('navigation action responses', () => {
 
     await expect(runAction('browser_click', { index: 1 }, {
       ids,
-      budget: { maxItems: 20, maxForms: 10, maxChars: 2_000 },
+      budget: { maxItems: 20, maxForms: 10, maxHiddenForms: 40, maxChars: 2_000 },
     })).resolves.toEqual({ text: expect.stringContaining('outside the controlled frame') })
 
     await vi.advanceTimersByTimeAsync(0)
@@ -112,7 +112,7 @@ describe('navigation action responses', () => {
 
     const result = await runAction('browser_click', { index: 1 }, {
       ids,
-      budget: { maxItems: 20, maxForms: 10, maxChars: 2_000 },
+      budget: { maxItems: 20, maxForms: 10, maxHiddenForms: 40, maxChars: 2_000 },
     })
 
     expect(result.text).toContain('native browser activation')
@@ -134,7 +134,7 @@ describe('navigation action responses', () => {
 
     const result = await runAction('browser_click', { index: 1 }, {
       ids,
-      budget: { maxItems: 20, maxForms: 10, maxChars: 2_000 },
+      budget: { maxItems: 20, maxForms: 10, maxHiddenForms: 40, maxChars: 2_000 },
     })
 
     expect(result.navigationPending).toBeUndefined()

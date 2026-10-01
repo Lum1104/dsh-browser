@@ -17,7 +17,7 @@ import { SelectionWatcher } from './selection.ts'
 import type { SnapshotBudget } from './snapshot.ts'
 
 /** Negotiated snapshot budgets, patched in from the background via message. */
-let budget: SnapshotBudget = { maxItems: 60, maxForms: 30, maxChars: DEFAULT_SNAPSHOT_MAX_CHARS }
+let budget: SnapshotBudget = { maxItems: 60, maxForms: 30, maxHiddenForms: 40, maxChars: DEFAULT_SNAPSHOT_MAX_CHARS }
 
 const ids = new ElementIds()
 

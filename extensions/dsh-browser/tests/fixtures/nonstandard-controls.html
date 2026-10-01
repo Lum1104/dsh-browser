@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>Nonstandard controls fixture</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 42rem; }
+    .add-btn { cursor: pointer; color: #165dff; display: inline-block; margin: 0.5rem 0; }
+    .form-item { margin: 0.75rem 0; }
+    .form-item .label { cursor: pointer; margin-bottom: 0.25rem; }
+    .picker-wrap { cursor: pointer; }
+    .picker-trigger { cursor: pointer; border: 1px solid #ccc; padding: 0.4rem 0.6rem; display: inline-block; }
+    .picker-panel { display: none; border: 1px solid #ddd; padding: 0.5rem; margin-top: 0.25rem; position: absolute; z-index: 100; background: #fff; min-width: 12rem; }
+    .picker-panel.open { display: block; }
+    /* Intentionally NO cursor:pointer — mirrors design-system year/month cells. */
+    .year-cell, .month-cell { display: inline-block; padding: 0.25rem 0.5rem; margin: 0.1rem; }
+    .year-cell:hover, .month-cell:hover { background: #f2f3f5; }
+    .select-trigger { cursor: pointer; border: 1px solid #ccc; padding: 0.4rem 0.6rem; }
+    .select-menu { display: none; border: 1px solid #ddd; margin-top: 0.25rem; }
+    .select-menu.open { display: block; }
+    .select-option { cursor: pointer; padding: 0.35rem 0.6rem; }
+    .select-option:hover { background: #f2f3f5; }
+    #file-input { display: none; }
+    .upload-btn { cursor: pointer; border: 1px dashed #aaa; padding: 0.6rem; display: inline-block; }
+    .hidden-input { opacity: 0; width: 0; height: 0; position: absolute; }
+  </style>
+</head>
+<body>
+  <h1>工作经历</h1>
+
+  <section id="work-list">
+    <div class="add-btn" role="presentation" aria-label="添加">添加</div>
+  </section>
+
+  <section id="date-range" class="form-item">
+    <!-- Nested pointer: outer wrap is not the real trigger; only inner opens on mousedown/focus. -->
+    <div class="picker-wrap" id="range-wrap" style="cursor:pointer">
+      <span class="label" style="cursor:pointer">起止时间</span>
+      <span class="picker-trigger" id="range-trigger" style="cursor:pointer" aria-haspopup="dialog">YYYY-MM YYYY-MM</span>
+      <input id="range-value" class="hidden-input" value="" readonly />
+    </div>
+    <div class="picker-panel" id="range-panel" role="dialog">
+      <div class="year-cell" data-value="2024">2024</div>
+      <div class="year-cell" data-value="2019">2019</div>
+      <div class="month-cell" data-value="01">01</div>
+      <div class="month-cell" data-value="07">07</div>
+    </div>
+  </section>
+
+  <section id="project-name" class="form-item">
+    <div class="label" style="cursor:pointer">项目名称</div>
+    <input id="project-name-input" aria-label="项目名称" placeholder="项目名称" />
+  </section>
+
+  <section id="city-select" class="form-item">
+    <div class="label">城市</div>
+    <div class="select-trigger" id="city-trigger" aria-haspopup="listbox">请选择</div>
+    <input id="city-value" class="hidden-input" value="" />
+    <div class="select-menu" id="city-menu" role="listbox">
+      <div class="select-option" role="option" data-value="北京">北京</div>
+      <div class="select-option" role="option" data-value="上海">上海</div>
+    </div>
+  </section>
+
+  <section id="shadow-host-wrap">
+    <label>Shadow 按钮</label>
+    <div id="shadow-host"></div>
+  </section>
+
+  <section id="upload">
+    <label>简历附件</label>
+    <div class="upload-btn" id="upload-trigger">上传文件</div>
+    <input id="file-input" type="file" />
+    <span id="upload-name"></span>
+  </section>
+
+  <button id="submit" type="button">提交</button>
+  <pre id="result"></pre>
+
+  <script>
+    const list = document.getElementById('work-list')
+    list.querySelector('.add-btn').addEventListener('click', () => {
+      const row = document.createElement('div')
+      row.className = 'work-row'
+      row.innerHTML = '<input name="company" placeholder="公司名称" />'
+      list.appendChild(row)
+    })
+
+    const trigger = document.getElementById('range-trigger')
+    const panel = document.getElementById('range-panel')
+    const rangeValue = document.getElementById('range-value')
+    const picked = []
+    // Intentionally no click handler: open only on mousedown / focus (Arco-like).
+    const openPanel = () => { panel.classList.add('open') }
+    trigger.addEventListener('mousedown', openPanel)
+    trigger.addEventListener('focus', openPanel)
+    rangeValue.addEventListener('focus', openPanel)
+    panel.querySelectorAll('.year-cell, .month-cell').forEach((el) => {
+      el.addEventListener('click', () => {
+        picked.push(el.getAttribute('data-value'))
+        if (picked.length >= 2) {
+          rangeValue.value = picked.slice(-2).join(' ')
+          trigger.textContent = rangeValue.value
+          panel.classList.remove('open')
+        }
+      })
+    })
+
+    const cityTrigger = document.getElementById('city-trigger')
+    const cityMenu = document.getElementById('city-menu')
+    const cityValue = document.getElementById('city-value')
+    cityTrigger.addEventListener('mousedown', () => cityMenu.classList.add('open'))
+    cityMenu.querySelectorAll('.select-option').forEach((el) => {
+      el.addEventListener('click', () => {
+        cityValue.value = el.getAttribute('data-value')
+        cityTrigger.textContent = cityValue.value
+        cityMenu.classList.remove('open')
+      })
+    })
+
+    const shadowHost = document.getElementById('shadow-host')
+    const shadow = shadowHost.attachShadow({ mode: 'open' })
+    shadow.innerHTML = '<button id="shadow-btn">Shadow OK</button>'
+    shadow.getElementById('shadow-btn').addEventListener('click', () => {
+      shadowHost.dataset.clicked = '1'
+    })
+
+    const fileInput = document.getElementById('file-input')
+    document.getElementById('upload-trigger').addEventListener('click', () => fileInput.click())
+    fileInput.addEventListener('change', () => {
+      document.getElementById('upload-name').textContent = fileInput.files?.[0]?.name || ''
+    })
+
+    document.getElementById('submit').addEventListener('click', () => {
+      document.getElementById('result').textContent = JSON.stringify({
+        companies: [...document.querySelectorAll('input[name=company]')].map((el) => el.value),
+        range: rangeValue.value,
+        city: cityValue.value,
+        project: document.getElementById('project-name-input').value,
+        shadow: shadowHost.dataset.clicked === '1',
+        file: fileInput.files?.[0]?.name || '',
+      }, null, 2)
+    })
+  </script>
+</body>
+</html>

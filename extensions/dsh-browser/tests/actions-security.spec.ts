@@ -13,7 +13,7 @@ describe('page action result trust boundary', () => {
 
     await expect(runAction('browser_click', { index: 7 }, {
       ids,
-      budget: { maxItems: 20, maxForms: 10, maxChars: 2_000 },
+      budget: { maxItems: 20, maxForms: 10, maxHiddenForms: 40, maxChars: 2_000 },
     })).rejects.toMatchObject({
       message: 'Button [7] is disabled.',
     })

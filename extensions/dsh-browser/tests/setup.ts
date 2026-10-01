@@ -23,6 +23,14 @@ Object.defineProperty(Element.prototype, 'getBoundingClientRect', {
   },
 })
 
+Object.defineProperty(Element.prototype, 'scrollIntoView', {
+  configurable: true,
+  writable: true,
+  value: function scrollIntoView(): void {
+    // jsdom has no layout; production code may call this after resolving a target.
+  },
+})
+
 Object.defineProperty(globalThis, 'CSS', {
   configurable: true,
   value: {

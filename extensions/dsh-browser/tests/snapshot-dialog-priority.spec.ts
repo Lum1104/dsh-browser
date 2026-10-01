@@ -9,7 +9,7 @@ import { buildSnapshot, type SnapshotBudget } from '../src/content/snapshot.ts'
  * caller could see the page behind the dialog but not the dialog itself.
  */
 
-const TIGHT: SnapshotBudget = { maxItems: 3, maxForms: 5, maxChars: 4_000 }
+const TIGHT: SnapshotBudget = { maxItems: 3, maxForms: 5, maxHiddenForms: 40, maxChars: 4_000 }
 
 function filler(count: number): string {
   return Array.from({ length: count }, (_, i) => `<button>page-${i}</button>`).join('')

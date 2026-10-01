@@ -49,10 +49,12 @@ Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：
 
 | 能力 | 工具 | 说明 |
 |---|---|---|
-| 读取页面 | `browser_snapshot` | 结构化文本快照：标题/URL/正文/编号交互清单/表单字段（敏感值掩码）；`delta: true` 只返回变化 |
-| 点击元素 | `browser_click` | 按编号点击链接/按钮/复选框等 |
-| 填写表单 | `browser_type` | 输入文本（React/Vue 受控组件兼容），`replace` 清空重填 |
-| 按键 | `browser_press` | 键盘事件（Enter/Tab/Escape/方向键…） |
+| 读取页面 | `browser_snapshot` | 结构化文本快照：标题/URL/正文/编号交互清单（含启发式可点击项）/表单字段（敏感值掩码）；`region` 同时限定正文与清单；`delta: true` 只返回变化 |
+| 点击元素 | `browser_click` | 按编号、CSS 选择器或可见文本三选一点击。嵌套启发式优先更高 `depth`；打开的日期面板会露出 `[overlay]` 选项，年份/月份请用 `text:"2024"` / `text:"01"`。派发 pointerdown→mousedown→focus→mouseup→click |
+| 填写表单 | `browser_type` | 按编号或选择器定位；兼容 React/Vue 受控输入；`replace` 清空重填；隐藏的日期/下拉真实 input 可列出并写入。**写入隐藏 input 不会驱动受控日期组件**——应点击面板单元格 |
+| 聚焦元素 | `browser_focus` | 按编号或选择器聚焦，便于后续按键/输入 |
+| 上传文件 | `browser_upload` | Host 读取本机绝对路径（有大小/扩展名限制）写入 `input[type=file]`；需审批 |
+| 按键 | `browser_press` | 向当前焦点元素发送按键（Enter/Escape/方向键/Backspace/Delete）。不是真实 Tab 焦点遍历，不支持 IME；浮层打开时不会合成 form submit |
 | 滚动 | `browser_scroll` | 视口滚动（up/down/top/bottom） |
 | 页面导航 | `browser_navigate` / `browser_open_tab` / `browser_back` / `browser_forward` / `browser_reload` | 受控标签页内导航，或新开标签页并跟随（`active:false` 时保持当前页在前台） |
 | 列出标签页 | `browser_list_tabs` | 列出可访问标签页的稳定 ID、标题、URL、窗口/顺序以及活动/受控状态 |
@@ -62,6 +64,13 @@ Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：
 | 等待稳定 | `browser_wait` | 页面加载与渲染稳定检测 |
 | 发送图片 | `session.prompt` / `session.attachment` | 按宿主能力启用图片草稿、纯图片消息和持久历史预览 |
 | 引用选中内容 | 侧栏输入框 | 在页面里划选的文字会出现在输入框，随下一条消息一起发送，并带上来源与不可信内容边界 |
+
+### 已知限制
+
+- Closed Shadow DOM 对内容脚本不可读。
+- `browser_press` 只在焦点元素上合成键盘事件，不能用 Tab 真实移动焦点，也不能驱动 IME；需要可信事件的场景需 CDP / `chrome.debugger`（不在本仓库范围）。
+- 嵌套启发式控件带 `depth`；浅层点击无效时，应改点同链路上更高 depth 的项。
+- 视觉隐藏的 input 只反映受控 picker 的当前值；用 `browser_type` 写入它们不会打开面板，也不会更新 React/Vue 组件状态。
 
 ## 组成
 

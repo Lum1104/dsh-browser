@@ -49,10 +49,12 @@ The paired Playwright / extension duration ratio was **1.24** (95% CI **1.16–1
 
 | Capability | Tool | Notes |
 |---|---|---|
-| Read page | `browser_snapshot` | Structured text snapshot: title, URL, main text, numbered controls, and masked form fields; `delta: true` returns only changes |
-| Click element | `browser_click` | Click links, buttons, checkboxes, and other controls by inventory number |
-| Fill forms | `browser_type` | React/Vue-compatible input; `replace` clears the field first |
-| Press keys | `browser_press` | Keyboard events such as Enter, Tab, Escape, and arrow keys |
+| Read page | `browser_snapshot` | Structured text snapshot: title, URL, main text, numbered controls (including heuristic clickables), and masked form fields; `region` scopes text **and** inventory; `delta: true` returns only changes |
+| Click element | `browser_click` | Click by snapshot index, CSS selector, or visible text (exactly one). Prefer higher `depth` for nested heuristics. Open picker panels expose `[overlay]` options; prefer `text:"2024"` / `text:"01"` for year/month cells. Dispatches pointerdown→mousedown→focus→mouseup→click |
+| Fill forms | `browser_type` | Address by index or selector; React/Vue-compatible input; `replace` clears first; hidden date/select inputs are listed and writable. Writing a hidden input does **not** update controlled design-system pickers — click the panel cells instead |
+| Focus element | `browser_focus` | Focus by index or selector before press/type |
+| Upload file | `browser_upload` | Host reads an absolute local path (size/extension limits) into `input[type=file]`; requires approval |
+| Press keys | `browser_press` | Sends a key to the focused element (Enter, Escape, arrows, Backspace, Delete). Does not move focus via Tab, does not produce IME text, and does not synthesize form submit while a picker/dropdown overlay is open |
 | Scroll | `browser_scroll` | Viewport scrolling: up, down, top, and bottom |
 | Navigate | `browser_navigate` / `browser_open_tab` / `browser_back` / `browser_forward` / `browser_reload` | Navigation inside the controlled tab, or open a URL in a new tab and follow it (`active:false` keeps the current tab in front) |
 | List tabs | `browser_list_tabs` | List accessible tabs with stable IDs, titles, URLs, window/index metadata, and active/controlled state |
@@ -62,6 +64,13 @@ The paired Playwright / extension duration ratio was **1.24** (95% CI **1.16–1
 | Wait for stability | `browser_wait` | Page-load and render-settle detection |
 | Send images | `session.prompt` / `session.attachment` | Host-capability-gated image drafts, image-only prompts, and durable history previews |
 | Quote a selection | side panel composer | Text you highlight in the page appears in the composer and is sent with your next message as fenced, attributed page content |
+
+### Known limits
+
+- Closed Shadow DOM is not readable from the content script.
+- `browser_press` synthesizes keyboard events on the focused element; it does not move focus via Tab, cannot drive IME composition, and does not synthesize form submit while a floating picker/dropdown is open (persistent in-flow panels do not count). Trusted-event-only flows need CDP / `chrome.debugger` (out of scope).
+- Nested heuristic controls expose `depth`; when a shallow click does nothing, retry a higher-depth sibling on the same chain.
+- Visually hidden inputs are listed (values always masked) so agents can address them; assigning them with `browser_type` will not open panels or update React/Vue picker state — click overlay cells instead.
 
 ## Repository layout
 
@@ -78,7 +87,7 @@ scripts/install.ps1
 - **Your real browser, not a headless copy**: the model works in the page you already have open, retaining logins, sessions, and cookies.
 - **A text-first page interface**: numbered controls, stable IDs across snapshots, delta updates, and masked sensitive values make pages operable without screenshots; user-attached chat images use dsh's separate multimodal message path.
 - **Pointing instead of describing**: highlight the passage you mean and the side panel quotes it, so "explain this" needs no page tour. The quote is captured only while a panel is open, and nothing is sent until you send the message.
-- **A narrow privacy boundary**: passwords and payment-card values are always rendered as `••••` and never leave the page.
+- **A narrow privacy boundary**: passwords, payment-card values, token/OTP-like fields, and CSS-hidden form inventory values are always rendered as `••••` and never leave the page.
 - **A guarded bridge**: authenticated handshakes protect remote connections, privileged gateway methods reject non-loopback callers, and the extension binds tools to one user-controlled tab.
 
 ## Detailed installation and usage

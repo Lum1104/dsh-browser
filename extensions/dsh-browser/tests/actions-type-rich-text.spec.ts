@@ -9,7 +9,7 @@ import type { ElementIds } from '../src/content/ids.ts'
  * through the browser editing pipeline instead of a direct DOM assignment.
  */
 
-const BUDGET = { maxItems: 20, maxForms: 10, maxChars: 2_000 }
+const BUDGET = { maxItems: 20, maxForms: 10, maxHiddenForms: 40, maxChars: 2_000 }
 
 function idsFor(element: Element): ElementIds {
   return { elementByIndex: vi.fn(() => element) } as unknown as ElementIds

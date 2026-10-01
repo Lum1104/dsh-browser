@@ -3,7 +3,7 @@
   "name": "__MSG_extensionName__",
   "description": "__MSG_extensionDescription__",
   "default_locale": "en",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "minimum_chrome_version": "116",
   "permissions": [
     "sidePanel",

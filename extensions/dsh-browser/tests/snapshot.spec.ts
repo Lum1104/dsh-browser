@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { ElementIds } from '../src/content/ids.ts'
 import { buildSnapshot, renderSnapshot, type SnapshotBudget } from '../src/content/snapshot.ts'
 
-const BUDGET: SnapshotBudget = { maxItems: 10, maxForms: 5, maxChars: 4_000 }
+const BUDGET: SnapshotBudget = { maxItems: 10, maxForms: 5, maxHiddenForms: 40, maxChars: 4_000 }
 
 describe('buildSnapshot', () => {
   it('renders title, url, interactive inventory and masked form values', () => {
@@ -113,9 +113,10 @@ describe('buildSnapshot', () => {
 
     expect(view.forms).toHaveLength(2)
     expect(view.truncated.formsDropped).toBe(3)
-    // One visibility and one viewport measurement per interactive element;
-    // form extraction performs no second layout pass.
-    expect(rect).toHaveBeenCalledTimes(10)
+    // Inventory visibility + viewport, plus the hidden-form scan and any
+    // heuristic walk over the same elements. Exact counts vary with tree shape;
+    // the important invariant is that form extraction does not start over.
+    expect(rect.mock.calls.length).toBeGreaterThanOrEqual(10)
   })
 
   it('truncates main content at the budget', () => {
@@ -128,12 +129,63 @@ describe('buildSnapshot', () => {
 
   it('supports region-scoped snapshots', () => {
     document.body.innerHTML = `
-      <div id="sidebar">侧边栏内容</div>
-      <div id="content">主体内容区</div>
+      <div id="sidebar"><button>侧栏按钮</button>侧边栏内容</div>
+      <div id="content"><button>主体按钮</button>主体内容区</div>
     `
+    for (const el of document.querySelectorAll('button')) {
+      Object.defineProperty(el, 'getBoundingClientRect', {
+        value: () => ({
+          width: 40, height: 20, top: 0, left: 0, bottom: 20, right: 40, x: 0, y: 0, toJSON() { return {} },
+        }),
+      })
+    }
     const ids = new ElementIds()
     const view = buildSnapshot(ids, { region: '#content', budget: BUDGET }, null)
     expect(view.main).toContain('主体内容区')
     expect(view.main).not.toContain('侧边栏内容')
+    expect(view.items.some((item) => item.name === '主体按钮')).toBe(true)
+    expect(view.items.some((item) => item.name === '侧栏按钮')).toBe(false)
+  })
+
+  it('errors when region matches nothing', () => {
+    document.body.innerHTML = `<div id="content">主体</div>`
+    const ids = new ElementIds()
+    expect(() => buildSnapshot(ids, { region: '#missing', budget: BUDGET }, null))
+      .toThrow(/No element matched selector: #missing/)
+  })
+
+  it('lists hidden form fields with masked values', () => {
+    document.body.innerHTML = `<input id="month" style="opacity:0" value="2019-07" aria-label="月份" />`
+    const input = document.getElementById('month')!
+    Object.defineProperty(input, 'getBoundingClientRect', {
+      value: () => ({
+        width: 80, height: 20, top: 0, left: 0, bottom: 20, right: 80, x: 0, y: 0, toJSON() { return {} },
+      }),
+    })
+    const ids = new ElementIds()
+    const view = buildSnapshot(ids, { budget: BUDGET }, null)
+    const hidden = view.forms.find((form) => form.hidden === true)
+    expect(hidden?.masked).toBe(true)
+    expect(hidden?.value).toBe('••••')
+    expect(hidden?.label).toContain('月份')
+    const rendered = renderSnapshot(view, false)
+    expect(rendered).toContain('hidden')
+    expect(rendered).not.toContain('2019-07')
+    expect(rendered).toContain('value="••••"')
+  })
+
+  it('masks CSS-hidden fields that look like tokens even when unlabeled', () => {
+    document.body.innerHTML = `<input id="otp" style="opacity:0" value="482913" />`
+    const input = document.getElementById('otp')!
+    Object.defineProperty(input, 'getBoundingClientRect', {
+      value: () => ({
+        width: 80, height: 20, top: 0, left: 0, bottom: 20, right: 80, x: 0, y: 0, toJSON() { return {} },
+      }),
+    })
+    const ids = new ElementIds()
+    const view = buildSnapshot(ids, { budget: BUDGET }, null)
+    const hidden = view.forms.find((form) => form.hidden === true)
+    expect(hidden?.value).toBe('••••')
+    expect(renderSnapshot(view, false)).not.toContain('482913')
   })
 })

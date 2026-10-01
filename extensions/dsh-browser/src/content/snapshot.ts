@@ -10,12 +10,25 @@
  * @module
  */
 
-import { accessibleName, collectInteractive, isInViewport, isVisible, mainText, pageText, truncate } from './extract.ts'
+import {
+  accessibleName,
+  collectHiddenForms,
+  collectInteractive,
+  formControlLabel,
+  isInViewport,
+  isVisible,
+  mainText,
+  pageText,
+  truncate,
+  type InteractiveSource,
+} from './extract.ts'
 import { ElementIds } from './ids.ts'
 import { isSensitiveField, maskValue } from './privacy.ts'
 
 /** Role label per element kind (model-facing vocabulary). */
-function roleOf(el: Element): string {
+function roleOf(el: Element, source: InteractiveSource): string {
+  if (source === 'overlay') return 'option'
+  if (source === 'heuristic') return 'clickable'
   const role = el.getAttribute('role')
   if (role !== null && role !== '') return role
   if (el instanceof HTMLAnchorElement) return 'link'
@@ -43,6 +56,10 @@ interface InventoryItem {
   selected?: boolean
   href?: string
   inViewport: boolean
+  /** How the element was discovered; omitted/`selector` is the CSS whitelist. */
+  source?: InteractiveSource
+  /** Nesting depth among heuristic pointer ancestors (rendered for self-correction). */
+  depth?: number
 }
 
 /** One numbered form field with its (masked) value. */
@@ -54,6 +71,8 @@ interface FormFieldView {
   masked: boolean
   checked?: boolean
   required?: boolean
+  /** True when the control is visually hidden but still in the form inventory. */
+  hidden?: boolean
 }
 
 /** One page snapshot. */
@@ -81,6 +100,8 @@ export interface SnapshotView {
 export interface SnapshotBudget {
   maxItems: number
   maxForms: number
+  /** Cap on visually hidden form controls listed alongside visible forms. */
+  maxHiddenForms: number
   maxChars: number
 }
 
@@ -165,6 +186,37 @@ function openDialogOf(el: Element, isOpen: (dialog: Element) => boolean): Elemen
   return dialog !== null && isOpen(dialog) ? dialog : null
 }
 
+function formFieldView(
+  el: Element,
+  index: number,
+  label: string,
+  hidden: boolean,
+): FormFieldView | undefined {
+  if (!(el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement)) {
+    return undefined
+  }
+  // CSS-hidden inventory can hold OTP/token/picker state; never echo those values.
+  const masked = hidden || isSensitiveField(el)
+  const checkable = el instanceof HTMLInputElement && (el.type === 'checkbox' || el.type === 'radio')
+  const value = checkable
+    ? ''
+    : el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+    ? el.value
+    : el instanceof HTMLSelectElement
+      ? selectedText(el)
+      : ''
+  return {
+    index,
+    label,
+    kind: el instanceof HTMLInputElement ? el.type : el.tagName.toLowerCase(),
+    value: masked ? maskValue(value) : value.slice(0, 120),
+    masked,
+    ...checkable ? { checked: el.checked } : {},
+    ...el instanceof HTMLInputElement && el.required ? { required: true } : {},
+    ...hidden ? { hidden: true } : {},
+  }
+}
+
 /**
  * Build a snapshot of the current page.
  *
@@ -172,33 +224,74 @@ function openDialogOf(el: Element, isOpen: (dialog: Element) => boolean): Elemen
  * then viewport-first, capped), extracts main content (budgeted), and — in
  * delta mode — diffs against the previous snapshot.
  *
+ * When `region` is set, main text and the interactive/form inventories are
+ * scoped to that element for rendering, but the stable id registry is always
+ * reconciled against the full document so out-of-region indexes stay valid.
+ * Callers must resolve the selector first; this function throws when the
+ * region is missing or the selector is invalid CSS.
+ *
  * @param ids - the stable id registry (one per content-script lifetime).
  * @param options - delta flag, region selector, and negotiated budgets.
  * @param last - previous snapshot view, or null for the first snapshot.
  * @returns the snapshot view.
  */
 export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: SnapshotView | null): SnapshotView {
-  const elements = collectInteractive(document)
-  const { added, removed } = ids.assign(elements)
-  // A renumbering is only meaningful relative to a previous snapshot: the
-  // first snapshot on a fresh document always adds everything.
-  const reindexed = last !== null && added + removed > elements.length * 0.5
+  const regionRoot = resolveRegionRoot(options.region)
+  // Always reconcile ids against the full document so a region snapshot does not
+  // drop out-of-region indexes (actions may still target them by prior numbers).
+  const fullCollected = collectInteractive(document)
+  const fullHiddenForms = collectHiddenForms(document)
+  const assignResult = ids.assign([
+    ...fullCollected.map((entry) => entry.element),
+    ...fullHiddenForms,
+  ])
+  const collected = regionRoot instanceof Document
+    ? fullCollected
+    : collectInteractive(regionRoot)
+  const sourceByElement = new Map(collected.map((entry) => [entry.element, entry.source]))
+  const depthByElement = new Map(
+    collected
+      .filter((entry) => entry.depth !== undefined)
+      .map((entry) => [entry.element, entry.depth!]),
+  )
+  const elements = collected.map((entry) => entry.element)
+  const hiddenFormElements = regionRoot instanceof Document
+    ? fullHiddenForms
+    : collectHiddenForms(regionRoot)
+  // 仅当有编号被回收时才提示「编号可能已变」：新增元素拿新号、旧号保持不变，
+  // 模型仍可按旧号操作已有元素。只有 removed > 0（旧号腾出、后续可能复用）才
+  // 构成真正的「重新编号」。
+  const reindexed = assignResult.removed > 0
 
-  // Measure viewport and dialog membership once. Calling getBoundingClientRect
-  // from a sort comparator forces repeated layout reads on large pages.
+  // Prefer open dialogs, then the viewport, then the rest of the document. A
+  // modal is inert behind its backdrop, so its controls must not compete with
+  // the page for the inventory budget — otherwise a late-mounted dialog is
+  // truncated away on element-heavy pages and the caller cannot dismiss it.
   const isOpenDialog = openDialogTest()
-  const elementViews = elements.map((element) => ({
-    element,
-    inViewport: isInViewport(element),
-    inDialog: openDialogOf(element, isOpenDialog) !== null,
-  }))
-  const ordered = [...elementViews].sort((a, b) =>
-    Number(b.inDialog) - Number(a.inDialog) || Number(b.inViewport) - Number(a.inViewport))
+  const ordered = elements
+    .map((el) => ({
+      element: el,
+      inViewport: isInViewport(el),
+      inDialog: openDialogOf(el, isOpenDialog) !== null,
+      // Deeper heuristic triggers beat shallow wrappers when budgets are tight.
+      depth: depthByElement.get(el) ?? 0,
+      source: sourceByElement.get(el) ?? 'selector',
+    }))
+    .sort((a, b) => Number(b.inDialog) - Number(a.inDialog)
+      // Open picker/dropdown cells outrank page chrome.
+      || Number(b.source === 'overlay') - Number(a.source === 'overlay')
+      || Number(b.inViewport) - Number(a.inViewport)
+      // Prefer selector hits over heuristics when both are equally visible.
+      || Number(a.source === 'heuristic') - Number(b.source === 'heuristic')
+      || b.depth - a.depth)
+
+  // Cache accessible names for the budgeted subset so the interactive and form
+  // inventories do not recompute the same ARIA walk for shared controls.
   const names = new Map<Element, string>()
-  const nameOf = (element: Element): string => {
+  const nameOf = (element: Element, hidden = false): string => {
     let name = names.get(element)
     if (name === undefined) {
-      name = accessibleName(element)
+      name = hidden ? formControlLabel(element) : accessibleName(element)
       names.set(element, name)
     }
     return name
@@ -208,11 +301,15 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
   for (const { element: el, inViewport } of ordered.slice(0, options.budget.maxItems)) {
     const index = ids.indexOf(el)
     if (index === undefined) continue
+    const source = sourceByElement.get(el) ?? 'selector'
+    const depth = depthByElement.get(el)
     const item: InventoryItem = {
       index,
-      role: roleOf(el),
+      role: roleOf(el, source),
       name: nameOf(el),
       inViewport,
+      ...source === 'heuristic' || source === 'overlay' ? { source } : {},
+      ...depth !== undefined ? { depth } : {},
     }
     if (el instanceof HTMLButtonElement && el.disabled) item.disabled = true
     if (el instanceof HTMLInputElement) {
@@ -231,34 +328,22 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
   const formElements = elements.filter((el) => el instanceof HTMLInputElement
     || el instanceof HTMLSelectElement
     || el instanceof HTMLTextAreaElement)
+  const maxHidden = options.budget.maxHiddenForms
   const forms: FormFieldView[] = []
   for (const el of formElements.slice(0, options.budget.maxForms)) {
     const index = ids.indexOf(el)
     if (index === undefined) continue
-    const masked = isSensitiveField(el)
-    const checkable = el instanceof HTMLInputElement && (el.type === 'checkbox' || el.type === 'radio')
-    const value = checkable
-      ? ''
-      : el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
-      ? el.value
-      : el instanceof HTMLSelectElement
-        ? selectedText(el)
-        : ''
-    forms.push({
-      index,
-      label: nameOf(el),
-      kind: el instanceof HTMLInputElement ? el.type : el.tagName.toLowerCase(),
-      value: masked ? maskValue(value) : value.slice(0, 120),
-      masked,
-      ...checkable ? { checked: el.checked } : {},
-      ...el instanceof HTMLInputElement && el.required ? { required: true } : {},
-    })
+    const view = formFieldView(el, index, nameOf(el), false)
+    if (view !== undefined) forms.push(view)
+  }
+  for (const el of hiddenFormElements.slice(0, maxHidden)) {
+    const index = ids.indexOf(el)
+    if (index === undefined) continue
+    const view = formFieldView(el, index, nameOf(el, true), true)
+    if (view !== undefined) forms.push(view)
   }
 
-  const regionEl = options.region !== undefined && options.region !== ''
-    ? document.querySelector(options.region)
-    : null
-  const mainSource = regionEl !== null ? pageText(regionEl) : mainText(document)
+  const mainSource = regionRoot instanceof Document ? mainText(document) : pageText(regionRoot)
   const mainBudget = Math.floor(options.budget.maxChars * 0.5)
   const main = truncate(mainSource, mainBudget)
 
@@ -285,6 +370,9 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
     }
   }
 
+  const formsDropped = Math.max(0, formElements.length - options.budget.maxForms)
+    + Math.max(0, hiddenFormElements.length - maxHidden)
+
   return {
     version: (last?.version ?? 0) + 1,
     url: location.href,
@@ -299,9 +387,40 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
     truncated: {
       mainChars: main.truncated,
       itemsDropped: Math.max(0, elements.length - options.budget.maxItems),
-      formsDropped: Math.max(0, formElements.length - options.budget.maxForms),
+      formsDropped,
     },
     budgetChars: options.budget.maxChars,
+  }
+}
+
+/** Resolve a region selector to its root element, or the document when unset. */
+export function resolveRegionRoot(region: string | undefined): Document | Element {
+  if (region === undefined || region === '') return document
+  let match: Element | null
+  try {
+    match = document.querySelector(region)
+  } catch {
+    throw new SnapshotInvalidSelectorError(region)
+  }
+  if (match === null) {
+    throw new SnapshotRegionError(region)
+  }
+  return match
+}
+
+/** Thrown when `region` matches no element (surfaced as `no-match`). */
+export class SnapshotRegionError extends Error {
+  constructor(readonly selector: string) {
+    super(`No element matched selector: ${selector}`)
+    this.name = 'SnapshotRegionError'
+  }
+}
+
+/** Thrown when `region` is not valid CSS (surfaced as `bad-args`). */
+export class SnapshotInvalidSelectorError extends Error {
+  constructor(readonly selector: string) {
+    super(`Invalid CSS selector: ${selector}`)
+    this.name = 'SnapshotInvalidSelectorError'
   }
 }
 
@@ -312,11 +431,12 @@ function selectedText(select: HTMLSelectElement): string {
 function sameItem(a: InventoryItem, b: InventoryItem): boolean {
   return a.role === b.role && a.name === b.name && a.href === b.href
     && a.disabled === b.disabled && a.checked === b.checked && a.inViewport === b.inViewport
+    && a.source === b.source && a.depth === b.depth
 }
 
 function sameForm(a: FormFieldView, b: FormFieldView): boolean {
   return a.label === b.label && a.kind === b.kind && a.value === b.value && a.masked === b.masked
-    && a.checked === b.checked && a.required === b.required
+    && a.checked === b.checked && a.required === b.required && a.hidden === b.hidden
 }
 
 /**
@@ -334,10 +454,16 @@ function capRendered(text: string, budgetChars: number): string {
 }
 
 function renderItem(item: InventoryItem): string {
+  const discoveryState = item.source === 'overlay'
+    ? 'overlay'
+    : item.source === 'heuristic'
+    ? (item.depth !== undefined && item.depth > 1 ? `heuristic/depth=${item.depth}` : 'heuristic')
+    : undefined
   const state = [
     item.disabled === true ? 'disabled' : undefined,
     item.checked === undefined ? undefined : item.checked ? 'checked' : 'unchecked',
     item.inViewport ? undefined : 'outside viewport',
+    discoveryState,
   ].filter((value) => value !== undefined).join('/')
   const stateText = state === '' ? '' : ` [${state}]`
   const hrefText = item.href !== undefined ? ` → ${item.href}` : ''
@@ -349,7 +475,8 @@ function renderForm(form: FormFieldView, includeIdentity: boolean): string {
   const state = form.checked === undefined
     ? `value="${form.masked ? '••••' : form.value}"`
     : `checked=${String(form.checked)}`
-  return `  [${form.index}] ${identity}${state}${form.required === true ? ' required' : ''}`
+  const hidden = form.hidden === true ? ' hidden' : ''
+  return `  [${form.index}] ${identity}${state}${form.required === true ? ' required' : ''}${hidden}`
 }
 
 function appendTruncationNotes(lines: string[], view: SnapshotView): void {

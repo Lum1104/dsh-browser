@@ -19,7 +19,7 @@ describe('isSensitiveField', () => {
   })
 
   it('flags fields named like secrets', () => {
-    for (const id of ['password', 'cardNumber', 'cvv2', 'credit_card', 'token_secret']) {
+    for (const id of ['password', 'cardNumber', 'cvv2', 'credit_card', 'token_secret', 'otp', 'apiKey', 'bearerToken']) {
       const input = document.createElement('input')
       input.id = id
       expect(isSensitiveField(input)).toBe(true)

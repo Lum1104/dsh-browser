@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { runAction } from '../src/content/actions.ts'
 import { ElementIds } from '../src/content/ids.ts'
 
-const BUDGET = { maxItems: 20, maxForms: 10, maxChars: 8_000 }
+const BUDGET = { maxItems: 20, maxForms: 10, maxHiddenForms: 40, maxChars: 8_000 }
 
 beforeEach(() => {
   vi.useFakeTimers()
