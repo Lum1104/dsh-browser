@@ -14,6 +14,7 @@ vi.mock('../src/panel/api.ts', () => ({
 }))
 
 import { App } from '../src/panel/App.tsx'
+import { createRemoteHostApi } from '@yuxianglin/dsh-bridge-browser/src/remote-host-api.ts'
 
 describe('panel session transitions', () => {
   let root: Root
@@ -88,6 +89,96 @@ describe('panel session transitions', () => {
       onResumeHint?.(hint)
     })
   }
+
+  it('shows the saved Session model and allows switching to the deployment default', async () => {
+    let selected = { provider: 'provider', model: 'saved-model' }
+    const host = createRemoteHostApi({
+      invoke: async ({ method, args }) => {
+        if (method === 'modelCatalog') return {
+          default: { provider: 'provider', model: 'default-model' },
+          routableProviders: ['provider'],
+          groups: [{ id: 'provider', name: 'Provider', models: [
+            { id: 'default-model', name: 'Default model' }, { id: 'saved-model', name: 'Saved model' },
+          ] }],
+          failures: [],
+        }
+        if (method === 'projections') return { asOfSeq: 7, values: { modelSelection: { next: selected } } }
+        if (method === 'selectModel') {
+          const request = args.request as { provider: string; model: string }
+          selected = { provider: request.provider, model: request.model }
+          return { selected }
+        }
+        throw new Error(`Unexpected Host method: ${method}`)
+      },
+      wireStream: {
+        open: async () => { throw new Error('unexpected stream') },
+        failure: (error) => ({ code: 'internal', message: String(error), details: {} }),
+      },
+    }, { createSharedFetchHandler: () => ({ fetch: async () => { throw new Error('unexpected fetch') } }) })
+    const original = rpc.getMockImplementation()!
+    rpc.mockImplementation(async (method, payload) => {
+      if (method !== 'session.models' && method !== 'session.selectModel') return original(method, payload)
+      const result = await host.call({ rpcId: method, method, payload, signal: new AbortController().signal })
+      if (!result.ok) throw new Error(result.error.message)
+      return result.value
+    })
+    await renderConnected(null)
+    const trigger = document.querySelector<HTMLButtonElement>('.composer-model-trigger')!
+    expect(trigger.textContent).toContain('Saved model')
+    await act(async () => { trigger.click() })
+    const option = [...document.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+      .find((button) => button.textContent === 'Default model')!
+    await act(async () => { option.click() })
+    expect(rpc).toHaveBeenCalledWith('session.selectModel', {
+      sessionId: 'session-current', provider: 'provider', model: 'default-model',
+    })
+    expect(selected.model).toBe('default-model')
+    expect(trigger.textContent).toContain('Default model')
+  })
+
+  it('keeps following arriving rows and stops only when the reader scrolls up', async () => {
+    await renderConnected(null)
+    const messages = document.querySelector<HTMLDivElement>('.messages')!
+    let scrollHeight = 1000
+    let scrollTop = 400
+    Object.defineProperties(messages, {
+      scrollHeight: { get: () => scrollHeight },
+      clientHeight: { get: () => 600 },
+      scrollTop: { get: () => scrollTop },
+    })
+    // Model the intermediate scroll event produced by CSS smooth scrolling.
+    messages.scrollTo = vi.fn((options: ScrollToOptions) => {
+      const destination = Math.min(options.top ?? 0, scrollHeight - 600)
+      scrollTop = options.behavior === 'instant' ? destination : scrollTop + 1
+      messages.dispatchEvent(new Event('scroll'))
+    }) as typeof messages.scrollTo
+    const append = async (seq: number): Promise<void> => {
+      await act(async () => {
+        scrollHeight += 200
+        onEvent?.({ t: 'event', frame: { rpcId: `row-${seq}`, method: 'session/event', payload: {
+          sessionId: 'session-current', event: { type: 'assistant/message', seq, surfaceOp: 'append', data: {
+            turn: seq, step: 0, message: { content: [{ type: 'text', text: `Message ${seq}` }] },
+          } },
+        } } })
+      })
+    }
+    await append(1)
+    await append(2)
+    expect(scrollTop).toBe(scrollHeight - 600)
+    expect(document.querySelector('.scroll-to-bottom')).toBeNull()
+
+    await act(async () => {
+      scrollTop -= 200
+      messages.dispatchEvent(new Event('scroll'))
+    })
+    const readingPosition = scrollTop
+    await append(3)
+    expect(scrollTop).toBe(readingPosition)
+    const jump = document.querySelector<HTMLButtonElement>('.scroll-to-bottom')!
+    expect(jump).not.toBeNull()
+    await act(async () => { jump.click() })
+    expect(messages.scrollTo).toHaveBeenLastCalledWith({ top: scrollHeight, behavior: 'smooth' })
+  })
 
   it('keeps the reconnect stream suffix when history resolves late, then shows only the durable settlement', async () => {
     let finishHistory: ((history: unknown) => void) | undefined

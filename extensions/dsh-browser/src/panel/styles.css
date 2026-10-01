@@ -538,6 +538,14 @@ textarea:focus-visible {
   justify-self: end;
 }
 
+.messages-pane {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
 .messages {
   display: flex;
   min-height: 0;
@@ -549,6 +557,49 @@ textarea:focus-visible {
   padding: 24px 16px 28px;
   scroll-behavior: smooth;
   scrollbar-gutter: stable;
+}
+
+.scroll-to-bottom {
+  position: absolute;
+  right: 16px;
+  bottom: 12px;
+  z-index: 2;
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  transition: border-color 150ms ease, background-color 150ms ease, color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+}
+
+.scroll-to-bottom svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+}
+
+.scroll-to-bottom:hover {
+  border-color: #aebcff;
+  color: var(--ink-strong);
+  box-shadow: 0 0 0 3px rgba(77, 107, 254, 0.1), var(--shadow);
+}
+
+.scroll-to-bottom:active {
+  transform: translateY(1px);
+}
+
+.scroll-to-bottom:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
 }
 
 .empty {

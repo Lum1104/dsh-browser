@@ -209,6 +209,7 @@ export interface PanelCopy {
     selectionAttached: string
     selectionTruncated: string
     removeSelection: string
+    scrollToBottom: string
   }
 }
 
@@ -441,6 +442,7 @@ const EN: PanelCopy = {
     selectionAttached: 'Selected text',
     selectionTruncated: '(truncated)',
     removeSelection: 'Remove the selected text',
+    scrollToBottom: 'Scroll to latest',
   },
 }
 
@@ -673,6 +675,7 @@ const ZH: PanelCopy = {
     selectionAttached: '选中的网页内容',
     selectionTruncated: '（已截断）',
     removeSelection: '移除选中内容',
+    scrollToBottom: '回到最新消息',
   },
 }
 

@@ -176,6 +176,8 @@ try {
   await rpc(BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, { sessionId, snapshot: 'Page: runtime smoke snapshot' })
   const history = await rpc('session.history', { sessionId })
   assert.ok(Array.isArray(history.events))
+  const selectedModel = { provider: 'smoke-provider', model: 'smoke-model' }
+  assert.deepEqual((await rpc('session.models', { sessionId })).current, selectedModel)
   const injected = history.events.flatMap(({ event }) => event.type === 'agent/inbox/spliced' ? event.data.inserted : [])
     .find(message => message.source.kind === 'browser-context')
   // DSH 0.2 producer-owned kinds use `browser-context` (not plugin:<package>).
@@ -188,6 +190,7 @@ try {
   await stop()
   rpc = await start(true)
   assert.equal((await observation()).source, 'prepared')
+  assert.deepEqual((await rpc('session.models', { sessionId })).current, selectedModel)
   assert.ok((await rpc('session.list', {})).items.some(item => item.sessionId === sessionId))
   const reopened = (await rpc('session.history', { sessionId })).events
   assert.deepEqual(reopened.slice(0, history.events.length), history.events)
@@ -204,7 +207,7 @@ try {
   // append seed/permission metadata. The migrated history prefix stays exact.
   assert.deepEqual(reopenedLegacy.events.slice(0, migrated.events.length), migrated.events)
   assert.deepEqual(await readFile(legacyFile), legacyBytes)
-  console.log('Real DSH smoke passed: discovery, token authentication, create/list/history, V2 migration, V4 browser snapshots, and prepared projections after restart')
+  console.log('Real DSH smoke passed: discovery, token authentication, create/list/history, Session model selection, V2 migration, V4 browser snapshots, and prepared projections after restart')
   succeeded = true
 } catch (error) {
   console.error(hostLog)
