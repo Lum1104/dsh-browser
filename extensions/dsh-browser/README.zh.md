@@ -90,7 +90,7 @@ pnpm --filter dsh-browser-extension run test
    或使用受支持的精确公开版本：
 
    ```sh
-   npx @deepseek-ai/dsh@0.2.0-rc.1 web
+   npx @deepseek-ai/dsh@0.2.0-rc.2 web
    ```
 
    两种命令都会从本机 `web` profile 加载同一个 bundle。默认端口为 3080；如被占用，可追加 `--port <port>`。

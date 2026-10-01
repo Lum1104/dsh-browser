@@ -37,10 +37,10 @@ cd $HOME\.dsh\dsh-browser; pnpm start
 
 Developers can instead clone the repository and run `./scripts/install.sh` followed by `pnpm start` from that checkout. The local mode uses the current branch without downloading or overwriting source files. Both installation modes register the same profile bundle; build tools resolve only from the selected workspace and never from a parent checkout or parent `node_modules` directory.
 
-The workspace pins dsh 0.2.0-rc.1, the minimum supported runtime. Older DSH releases are not supported:
+The workspace pins dsh 0.2.0-rc.2, the minimum supported runtime. Older DSH releases are not supported:
 
 ```sh
-npx @deepseek-ai/dsh@0.2.0-rc.1 web
+npx @deepseek-ai/dsh@0.2.0-rc.2 web
 ```
 
 The installer copies the unpacked extension to `~/.dsh/browser-extension` and opens `chrome://extensions`. Load that stable directory in Chrome and use the side panel. Loopback connections are discovered automatically and require no token entry; non-loopback deployments still require the configured bearer token.

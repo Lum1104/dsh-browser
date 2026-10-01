@@ -3,7 +3,7 @@ packages:
   - extensions/*
   - packages/*/*
 
-# Keep DSH peer providers explicit and on the tested 0.2.0-rc.1 release line.
+# Keep DSH peer providers explicit and on the tested 0.2.0-rc.2 release line.
 autoInstallPeers: false
 
 # dsh 运行时与扩展构建依赖这些受信任包的安装脚本。
