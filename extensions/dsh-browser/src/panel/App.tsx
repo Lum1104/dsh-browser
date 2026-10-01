@@ -7,7 +7,7 @@
  * @module
  */
 
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeCaps } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
@@ -63,7 +63,6 @@ import {
   restoreSubmittedDraft,
   type ComposerDraft,
 } from './composer.ts'
-import { isNearScrollBottom } from './scroll.ts'
 import {
   latestSessionTitle,
   projectedSessionTitle,
@@ -692,30 +691,8 @@ export function App(): React.JSX.Element {
   const seqRef = useRef(0)
   const sessionRef = useRef<string | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
-  const atBottomRef = useRef(true)
-  const [atBottom, setAtBottom] = useState(true)
 
   const nextSeq = (): number => { seqRef.current += 1; return seqRef.current }
-
-  function syncScrollBottom(): void {
-    const element = scrollRef.current
-    if (element === null) return
-    const next = isNearScrollBottom(element)
-    atBottomRef.current = next
-    setAtBottom((current) => current === next ? current : next)
-  }
-
-  function stickConversationToBottom(): void {
-    atBottomRef.current = true
-    setAtBottom(true)
-  }
-
-  function scrollMessagesToBottom(behavior: ScrollBehavior = 'smooth'): void {
-    const element = scrollRef.current
-    if (element === null) return
-    stickConversationToBottom()
-    element.scrollTo({ top: element.scrollHeight, behavior })
-  }
   const question = questions[0] ?? null
   const questionSubmitting = question !== null && hasPendingQuestion(questionSubmissions, question)
   const sessionSwitchBlocked = sessionChanging || busy || addingImages || stopping
@@ -824,7 +801,6 @@ export function App(): React.JSX.Element {
         followSnapshotsRef.current.clear()
         pendingHistoriesRef.current.clear()
         streamRefreshRef.current.clear()
-        stickConversationToBottom()
         setStreamRow(null)
         setRows([])
         setDraft((current) => ({ ...current, images: [] }))
@@ -886,25 +862,10 @@ export function App(): React.JSX.Element {
     if (sessionId !== undefined && queuedApproval !== undefined) void focusApprovalSession(queuedApproval)
   }, [queuedApproval?.id, queuedApproval?.sessionId, sessionChanging, state])
 
-  // Stick to the newest row only while the user is already near the bottom.
-  useLayoutEffect(() => {
-    if (!atBottomRef.current) return
-    // Scroll before ResizeObserver measures new content, without intermediate
-    // smooth-scroll events disabling follow while content keeps growing.
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'instant' })
-  }, [rows, streamRow, working])
-
-  // Sibling chrome (session picker, question card, errors, attachments) can
-  // resize the scrollport without a scroll event; keep bottom state honest.
+  // Auto-scroll to the newest row.
   useEffect(() => {
-    if (showSettings) return
-    const element = scrollRef.current
-    if (element === null || typeof ResizeObserver === 'undefined') return
-    syncScrollBottom()
-    const observer = new ResizeObserver(() => { syncScrollBottom() })
-    observer.observe(element)
-    return () => observer.disconnect()
-  }, [showSettings, question, error, showSessionPicker, draftImages.length, selection])
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
+  }, [rows, streamRow, working])
 
   useEffect(() => {
     if (!showModelPicker) return
@@ -1501,7 +1462,6 @@ export function App(): React.JSX.Element {
     nextQuestions: PendingQuestion[] = [],
     preserveSelection = false,
   ): void {
-    stickConversationToBottom()
     setRows([])
     setStreamRow(null)
     setDraft(emptyComposerDraft())
@@ -2233,8 +2193,7 @@ export function App(): React.JSX.Element {
               )}
         </section>
       )}
-      <div className="messages-pane">
-      <div className="messages" ref={scrollRef} onScroll={syncScrollBottom}>
+      <div className="messages" ref={scrollRef}>
         {rows.length === 0 && streamRow === null && !working && (
           <div className="empty">
             <span className="empty-logo"><img src={whaleUrl} alt="" /></span>
@@ -2269,18 +2228,6 @@ export function App(): React.JSX.Element {
             <span>{rows[rows.length - 1]?.kind === 'tool' ? copy.app.organizingResults : copy.app.thinking}</span>
           </div>
         )}
-      </div>
-      {!atBottom && (
-        <button
-          type="button"
-          className="scroll-to-bottom"
-          aria-label={copy.app.scrollToBottom}
-          title={copy.app.scrollToBottom}
-          onClick={() => scrollMessagesToBottom()}
-        >
-          <ChevronDownIcon />
-        </button>
-      )}
       </div>
       {question !== null && (
         <QuestionCard

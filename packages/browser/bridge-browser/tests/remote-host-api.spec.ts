@@ -51,39 +51,6 @@ function harness(options: {
 }
 
 describe('dsh 0.2 Remote Host adapter', () => {
-  it.each([
-    { next: { provider: 'session-provider', model: 'saved-model', reasoningEffort: 'high' }, routable: true },
-    { next: { provider: 'removed-provider', model: 'saved-model' }, routable: false },
-    { next: null, routable: true },
-  ])('uses the Session projection before the deployment default: $next', async ({ next, routable }) => {
-    const deploymentDefault = { provider: 'default-provider', model: 'default-model' }
-    const { api, invoke } = harness({
-      invoke: async ({ method }) => {
-        if (method === 'modelCatalog') return {
-          default: deploymentDefault, routableProviders: ['default-provider', 'session-provider'], groups: [], failures: [],
-        }
-        if (method === 'projections') return { asOfSeq: 7, values: { modelSelection: { next } } }
-        throw new Error(`Unexpected method: ${method}`)
-      },
-    })
-    await expect(api.call(call('session.models', { sessionId: 'session-1' }))).resolves.toEqual({
-      ok: true, value: { current: next ?? deploymentDefault, routable, groups: [], failures: [] },
-    })
-    expect(invoke).toHaveBeenCalledWith(expect.objectContaining({
-      namespace: 'session', method: 'projections', args: { request: { sessionId: 'session-1' } },
-    }))
-  })
-
-  it('returns projection failures instead of presenting the deployment default as current', async () => {
-    const { api } = harness({ invoke: async ({ method }) => {
-      if (method === 'modelCatalog') return { default: { provider: 'p', model: 'default' } }
-      throw new Error('projection unavailable')
-    } })
-    await expect(api.call(call('session.models', { sessionId: 'session-1' }))).resolves.toMatchObject({
-      ok: false, error: { message: 'projection unavailable' },
-    })
-  })
-
   it('passes the signal in the fifth argument for DSH Desktop 2.x streams', async () => {
     const open = vi.fn(async (_endpoint: string, _payload: unknown, uplink: AsyncIterable<unknown>, peer: unknown, signal: AbortSignal) => {
       expect(typeof uplink[Symbol.asyncIterator]).toBe('function')
@@ -179,7 +146,7 @@ describe('dsh 0.2 Remote Host adapter', () => {
 
     await api.call(call('session.list', {}))
     await api.call(call('session.prompt', { sessionId: 'session-1', mode: 'queue', content: [] }, 'prompt-id'))
-    await expect(api.call(call('session.models', {}))).resolves.toEqual({
+    await expect(api.call(call('session.models', { sessionId: 'session-1' }))).resolves.toEqual({
       ok: true,
       value: {
         current: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },

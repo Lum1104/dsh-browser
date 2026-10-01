@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { MAX_SELECTION_CHARS } from '../src/selection.ts'
+import { MAX_SELECTION_CHARS, type SelectionCapture } from '../src/selection.ts'
 import { SelectionWatcher, readSelectionCapture } from '../src/content/selection.ts'
 
 function selectText(value: string, anchor: Node | null = document.body): void {
@@ -28,6 +28,9 @@ afterEach(() => {
   document.title = ''
   Reflect.deleteProperty(navigator, 'userActivation')
   vi.unstubAllGlobals()
+  // Drop pending settle timers before restoring real clocks. Otherwise
+  // useRealTimers() hands them to Node, and they fire after jsdom is gone.
+  vi.clearAllTimers()
   vi.useRealTimers()
 })
 
@@ -96,10 +99,25 @@ describe('reading a page selection', () => {
 })
 
 describe('selection watcher', () => {
+  const watchers: SelectionWatcher[] = []
+
+  afterEach(() => {
+    for (const watcher of watchers.splice(0)) watcher.dispose()
+  })
+
+  function createWatcher(
+    emit: (capture: SelectionCapture) => void,
+    settleMs = 10,
+  ): SelectionWatcher {
+    const watcher = new SelectionWatcher(emit, settleMs)
+    watchers.push(watcher)
+    return watcher
+  }
+
   it('ignores a selection the page moved without a user gesture', () => {
     vi.useFakeTimers()
     const emit = vi.fn()
-    const watcher = new SelectionWatcher(emit, 10)
+    const watcher = createWatcher(emit)
     watcher.setEnabled(true)
 
     // An iframe calling getSelection().selectAllChildren() looks like this.
@@ -119,7 +137,7 @@ describe('selection watcher', () => {
   it('reports the same passage again after the panel dropped it', () => {
     vi.useFakeTimers()
     const emit = vi.fn()
-    const watcher = new SelectionWatcher(emit, 10)
+    const watcher = createWatcher(emit)
     watcher.setEnabled(true)
 
     selectText('quoted text')
@@ -137,7 +155,7 @@ describe('selection watcher', () => {
   it('ignores an arm command older than the one already applied', () => {
     vi.useFakeTimers()
     const emit = vi.fn()
-    const watcher = new SelectionWatcher(emit, 10)
+    const watcher = createWatcher(emit)
 
     expect(watcher.setEnabled(true, 5, 'worker-a')).toBe(true)
     // A slow DSH_CONTENT_READY reply computed before the panel opened.
@@ -153,7 +171,7 @@ describe('selection watcher', () => {
   it('accepts a fresh worker even when its revision counter restarted', () => {
     vi.useFakeTimers()
     const emit = vi.fn()
-    const watcher = new SelectionWatcher(emit, 10)
+    const watcher = createWatcher(emit)
 
     expect(watcher.setEnabled(true, 5, 'worker-a')).toBe(true)
     expect(watcher.setEnabled(false, 0, 'worker-b')).toBe(true)
@@ -167,7 +185,7 @@ describe('selection watcher', () => {
   it('stays silent until a panel arms it', () => {
     vi.useFakeTimers()
     const emit = vi.fn()
-    const watcher = new SelectionWatcher(emit, 10)
+    const watcher = createWatcher(emit)
 
     selectText('quoted text')
     document.dispatchEvent(new Event('selectionchange'))
@@ -184,7 +202,7 @@ describe('selection watcher', () => {
   it('reports a highlight made before the panel opened', () => {
     vi.useFakeTimers()
     const emit = vi.fn()
-    const watcher = new SelectionWatcher(emit, 10)
+    const watcher = createWatcher(emit)
 
     selectText('highlighted before opening')
     watcher.setEnabled(true)
@@ -197,7 +215,7 @@ describe('selection watcher', () => {
   it('emits once for a drag that fires many selection changes', () => {
     vi.useFakeTimers()
     const emit = vi.fn()
-    const watcher = new SelectionWatcher(emit, 10)
+    const watcher = createWatcher(emit)
     watcher.setEnabled(true)
 
     for (const partial of ['q', 'qu', 'quoted text']) {
@@ -214,7 +232,7 @@ describe('selection watcher', () => {
   it('keeps the captured quote when the user clears the highlight', () => {
     vi.useFakeTimers()
     const emit = vi.fn()
-    const watcher = new SelectionWatcher(emit, 10)
+    const watcher = createWatcher(emit)
     watcher.setEnabled(true)
 
     selectText('quoted text')
@@ -230,7 +248,7 @@ describe('selection watcher', () => {
   it('reports the same passage after the highlight was cleared', () => {
     vi.useFakeTimers()
     const emit = vi.fn()
-    const watcher = new SelectionWatcher(emit, 10)
+    const watcher = createWatcher(emit)
     watcher.setEnabled(true)
 
     selectText('quoted text')
@@ -249,7 +267,7 @@ describe('selection watcher', () => {
   it('reports when the same captured prefix becomes truncated', () => {
     vi.useFakeTimers()
     const emit = vi.fn()
-    const watcher = new SelectionWatcher(emit, 10)
+    const watcher = createWatcher(emit)
     watcher.setEnabled(true)
 
     selectText('x'.repeat(MAX_SELECTION_CHARS))
@@ -266,7 +284,7 @@ describe('selection watcher', () => {
   it('does not resend an unchanged highlight', () => {
     vi.useFakeTimers()
     const emit = vi.fn()
-    const watcher = new SelectionWatcher(emit, 10)
+    const watcher = createWatcher(emit)
     watcher.setEnabled(true)
 
     selectText('quoted text')
@@ -281,12 +299,11 @@ describe('selection watcher', () => {
   it('releases the page listener when it is disarmed', () => {
     vi.useFakeTimers()
     const emit = vi.fn()
-    const watcher = new SelectionWatcher(emit, 10)
-    watcher.setEnabled(true)
-    watcher.dispose()
-
+    const watcher = createWatcher(emit)
+    watcher.setEnabled(true, 5)
     selectText('quoted text')
     document.dispatchEvent(new Event('selectionchange'))
+    watcher.dispose()
     vi.advanceTimersByTime(50)
 
     expect(emit).not.toHaveBeenCalled()

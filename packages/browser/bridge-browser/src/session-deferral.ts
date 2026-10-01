@@ -34,8 +34,6 @@ interface ProvisionalEntry {
   /** The original create payload, replayed at materialization (keeps cwd/workspaceId). */
   payload: Record<string, unknown>
   createdAt: number
-  /** Keep failed model selections retryable after the Host Session was created. */
-  materialized?: boolean
   /** Composer switch chosen before the session exists on the Host. */
   selection?: ModelSelection
 }
@@ -64,40 +62,12 @@ export function withSessionDeferral(
   const prune = (): void => {
     const cutoff = Date.now() - PROVISIONAL_TTL_MS
     for (const [id, entry] of provisional) {
-      if (entry.createdAt < cutoff && !entry.materialized && !materializing.has(id)) provisional.delete(id)
+      if (entry.createdAt < cutoff) provisional.delete(id)
     }
   }
 
   const mintedId = (payload: Record<string, unknown>): string =>
     typeof payload.sessionId === 'string' ? payload.sessionId : `session-${crypto.randomUUID()}`
-
-  async function materialize(sessionId: string, entry: ProvisionalEntry, signal: AbortSignal): Promise<HostRpcResult> {
-    if (!entry.materialized) {
-      const created = await api.call({
-        rpcId: crypto.randomUUID(),
-        method: 'session.create',
-        payload: { ...entry.payload, sessionId },
-        signal,
-      })
-      if (!created.ok) return created
-      entry.materialized = true
-    }
-    // All prompts share this barrier, including those arriving during selection.
-    // A changed choice must also succeed before any queued prompt is admitted.
-    while (entry.selection !== undefined) {
-      const selection = entry.selection
-      const selected = await api.call({
-        rpcId: crypto.randomUUID(),
-        method: 'session.selectModel',
-        payload: { sessionId, ...selection },
-        signal,
-      })
-      if (!selected.ok) return selected
-      if (entry.selection === selection) delete entry.selection
-    }
-    provisional.delete(sessionId)
-    return { ok: true, value: { sessionId } }
-  }
 
   return {
     async call(call: HostRpcCall): Promise<HostRpcResult> {
@@ -112,8 +82,7 @@ export function withSessionDeferral(
       }
       if (call.method === 'session.history') {
         const sessionId = sessionIdOf(call.payload)
-        if (sessionId === undefined || !provisional.has(sessionId)
-          || provisional.get(sessionId)!.materialized) return api.call(call)
+        if (sessionId === undefined || !provisional.has(sessionId)) return api.call(call)
         return {
           ok: true,
           value: {
@@ -154,7 +123,12 @@ export function withSessionDeferral(
       const entry = provisional.get(sessionId)
       if (entry === undefined) return api.call(call)
       const existing = materializing.get(sessionId)
-      const pending = existing ?? materialize(sessionId, entry, call.signal)
+      const pending = existing ?? api.call({
+        rpcId: crypto.randomUUID(),
+        method: 'session.create',
+        payload: { ...entry.payload, sessionId },
+        signal: call.signal,
+      })
       if (existing === undefined) {
         materializing.set(sessionId, pending)
         void pending.then(
@@ -164,6 +138,20 @@ export function withSessionDeferral(
       }
       const created = await pending
       if (!created.ok) return created
+      const selection = entry.selection
+      provisional.delete(sessionId)
+      if (selection !== undefined) {
+        try {
+          await api.call({
+            rpcId: crypto.randomUUID(),
+            method: 'session.selectModel',
+            payload: { sessionId, ...selection },
+            signal: call.signal,
+          })
+        } catch {
+          // The prompt still proceeds; the Host keeps its deployment default.
+        }
+      }
       return api.call(call)
     },
     events: signal => api.events(signal),

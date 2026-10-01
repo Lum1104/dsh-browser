@@ -28,6 +28,7 @@ const FIELD_SELECTOR = 'input, textarea, select, [contenteditable]'
 
 /** The deepest focused element, following shadow roots the page may use. */
 function deepActiveElement(): Element | null {
+  if (typeof document === 'undefined') return null
   let active: Element | null = document.activeElement
   while (active?.shadowRoot?.activeElement != null) active = active.shadowRoot.activeElement
   return active
@@ -106,6 +107,7 @@ function hasUserGesture(): boolean {
  * @returns the capture, or null when nothing quotable is selected.
  */
 export function readSelectionCapture(): SelectionCapture | null {
+  if (typeof document === 'undefined') return null
   const raw = selectedText()
   if (raw === '') return null
   const { text, truncated } = normalizeSelectionText(raw)
@@ -147,14 +149,18 @@ export class SelectionWatcher {
     if (next === this.enabled) return false
     this.enabled = next
     if (next) {
-      document.addEventListener('selectionchange', this.onSelectionChange)
+      if (typeof document !== 'undefined') {
+        document.addEventListener('selectionchange', this.onSelectionChange)
+      }
       // Opening the panel arms the watcher, and the text the user highlighted
       // just before opening it fires no further selectionchange. Reading it
       // needs no page gesture: the user acted on the extension to get here.
       this.flushNow(false)
       return true
     }
-    document.removeEventListener('selectionchange', this.onSelectionChange)
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('selectionchange', this.onSelectionChange)
+    }
     this.cancel()
     this.lastEmitted = null
     return true
@@ -170,7 +176,14 @@ export class SelectionWatcher {
 
   /** Release page listeners left behind by a replaced content script. */
   dispose(): void {
-    this.setEnabled(false)
+    // Bypass the revision gate: a replaced script must drop its timer even
+    // when the last arm used a higher sequence than the default disarm.
+    this.enabled = false
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('selectionchange', this.onSelectionChange)
+    }
+    this.cancel()
+    this.lastEmitted = null
   }
 
   private cancel(): void {
