@@ -126,6 +126,7 @@ class RemoteHostApi implements BrowserHostApi {
 
   async call(call: HostRpcCall): Promise<HostRpcResult> {
     if (call.method === 'session.history') return this.sessionHistory(call)
+    if (call.method === 'session.models') return this.sessionModels(call)
     if (call.method === 'workspace.list') return this.workspaceList(call)
 
     const target = invokeTarget(call)
@@ -220,6 +221,27 @@ class RemoteHostApi implements BrowserHostApi {
         : await this.activeEvents.openSessionHistory(sessionId, call.signal, maxMessages)
       this.noteHistoryCursor(sessionId, snapshot.cursor)
       return { ok: true, value: historyValue(snapshot) }
+    } catch (error: unknown) {
+      return { ok: false, error: this.failure(error) }
+    }
+  }
+
+  /** Combine the deployment catalog with the Session's durable next selection. */
+  private async sessionModels(call: HostRpcCall): Promise<HostRpcResult> {
+    if (!isRecord(call.payload)) return badRequest('session.models payload must be an object')
+    const sessionId = sessionIdOf(call.payload)
+    try {
+      const catalog = await this.gateway.invoke({
+        namespace: 'session', method: 'modelCatalog', args: {}, signal: call.signal,
+      })
+      // Provisional Sessions request only the catalog and overlay their pending choice.
+      const projections = sessionId === undefined ? undefined : await this.gateway.invoke({
+        namespace: 'session', method: 'projections', args: { request: { sessionId } }, signal: call.signal,
+      })
+      const values = isRecord(projections) ? projections.values : undefined
+      const modelSelection = isRecord(values) ? values.modelSelection : undefined
+      const next = isRecord(modelSelection) ? modelSelectionOf(modelSelection.next) : undefined
+      return { ok: true, value: adaptModelCatalog(catalog, next) }
     } catch (error: unknown) {
       return { ok: false, error: this.failure(error) }
     }
@@ -919,6 +941,43 @@ function sessionIdOf(payload: unknown): string | undefined {
   return typeof payload.sessionId === 'string' && payload.sessionId.length > 0
     ? payload.sessionId
     : undefined
+}
+
+/** Map Host ModelCatalog into the extension's session.models directory shape. */
+function adaptModelCatalog(value: unknown, next?: ReturnType<typeof modelSelectionOf>): unknown {
+  if (!isRecord(value)) return value
+  const selection = next ?? modelSelectionOf(value.default)
+  const groups = Array.isArray(value.groups) ? value.groups : []
+  const failures = Array.isArray(value.failures) ? value.failures : []
+  const routableProviders = Array.isArray(value.routableProviders)
+    ? value.routableProviders.filter((entry): entry is string => typeof entry === 'string')
+    : []
+  const current = selection ?? { provider: 'none', model: 'none' }
+  return {
+    current,
+    routable: selection !== undefined && routableProviders.includes(selection.provider),
+    groups,
+    failures,
+  }
+}
+
+function modelSelectionOf(value: unknown): {
+  provider: string
+  model: string
+  reasoningEffort?: string
+} | undefined {
+  if (!isRecord(value)) return undefined
+  const provider = typeof value.provider === 'string' ? value.provider.trim() : ''
+  const model = typeof value.model === 'string' ? value.model.trim() : ''
+  if (provider === '' || model === '') return undefined
+  const reasoningEffort = typeof value.reasoningEffort === 'string' && value.reasoningEffort.trim() !== ''
+    ? value.reasoningEffort.trim()
+    : undefined
+  return {
+    provider,
+    model,
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+  }
 }
 
 function badRequest(message: string): HostRpcResult {
