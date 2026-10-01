@@ -35,6 +35,7 @@ import {
   DEFAULT_SNAPSHOT_MAX_CHARS,
   MIN_SNAPSHOT_MAX_CHARS,
 } from './protocol.ts'
+import { bridgeWsUrlFromHttpHost } from './bridge-url.ts'
 import { withSessionDeferral } from './session-deferral.ts'
 import { withSessionWorkspace } from './session-workspace.ts'
 import { purgeSessionFiles, type SessionPurgeDeps } from './session-purge.ts'
@@ -235,16 +236,26 @@ function mountBridge(
   // 异步 disposer：HMR/卸载时先等桥完全关闭（socket/泵/acceptor 静默）再继续。
   ctx.effect(() => () => server.close(), 'bridge-browser: bridge server')
 
-  // Zero-config discovery endpoint: the extension fetches this to learn the
-  // bridge WebSocket URL without any manual configuration. The URL carries no
-  // secret (loopback connections skip the token); non-loopback deployments
-  // keep requiring the token on the WS itself.
+  // Zero-config discovery endpoint: the extension (or a LAN client) fetches
+  // this to learn the bridge WebSocket URL. The URL carries no secret
+  // (loopback connections skip the token); non-loopback deployments keep
+  // requiring the token on the WS itself. Prefer the request Host so
+  // `--host 0.0.0.0` remotes are not told to dial 127.0.0.1 on their own machine.
   const configRoute: WebRoute = {
     kind: 'exact',
     path: BRIDGE_CONFIG_PATH,
-    handler: (_req, res) => {
+    handler: (req, res) => {
+      const hostHeader = firstHeaderValue(req.headers['x-forwarded-host'])
+        ?? firstHeaderValue(req.headers.host)
+      const forwardedProto = firstHeaderValue(req.headers['x-forwarded-proto'])
+      const secure = forwardedProto === 'https'
+        || (req.socket as { encrypted?: boolean }).encrypted === true
+      const wsUrl = bridgeWsUrlFromHttpHost(hostHeader, {
+        fallbackPort: ctx.webServer.port,
+        secure,
+      })
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ wsUrl: `ws://127.0.0.1:${ctx.webServer.port}${BRIDGE_PATH}` }))
+      res.end(JSON.stringify({ wsUrl }))
     },
   }
   ctx.effect(() => ctx.webServer.register(configRoute), 'bridge-browser: /ext/bridge-config route')
@@ -281,6 +292,21 @@ function mountBridge(
 
 type GatewayCandidate = Pick<TypertGatewayLike, 'invoke'> & {
   readonly wireStream?: TypertGatewayLike['wireStream']
+}
+
+/** First value of an HTTP header that may be a string or string[]. */
+function firstHeaderValue(value: string | string[] | undefined): string | undefined {
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    return trimmed === '' ? undefined : trimmed
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const trimmed = entry.trim()
+      if (trimmed !== '') return trimmed
+    }
+  }
+  return undefined
 }
 
 /** Check the minimum supported Gateway contract before mounting the bridge. */

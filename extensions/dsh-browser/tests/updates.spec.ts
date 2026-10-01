@@ -127,7 +127,8 @@ describe('extension update checks', () => {
     const installer = readFileSync(`${extensionRoot}/../../scripts/install.sh`, 'utf8')
 
     expect(packageManifest.version).toBe(chromeManifest.version)
-    expect(chromeManifest.content_security_policy.extension_pages).toContain(new URL(UPDATE_MANIFEST_URL).origin)
+    // Update checks fetch UPDATE_MANIFEST_URL over https; scheme source covers any host.
+    expect(chromeManifest.content_security_policy.extension_pages).toMatch(/\bhttps:/)
     expect(installer).toContain('INSTALL_MODE="managed"')
     expect(installer).toContain('INSTALL_MODE="checkout"')
     expect(installer).toContain('$DIST_DIR/install-info.json')

@@ -150,6 +150,13 @@ Chrome 本机使用无需配置；Firefox 需要填写上述本地桥 token。�
 - 确认桥接已加载：浏览器打开 `http://127.0.0.1:3080/ext/bridge-config`，应返回类似 `{"wsUrl":"ws://127.0.0.1:3080/ext/bridge"}` 的 JSON。如果返回的是网页而不是 JSON，说明当前运行的 dsh 早于桥接注册——重启 dsh 并刷新页面即可，扩展会自动重连。
 - 扩展会自动探测 3080/3081/3090/14389 端口。若 dsh 运行在其它端口，或使用 `--host 0.0.0.0` 远程部署，请在面板设置中填写地址与桥接 token。Firefox 始终需要 token。
 
+**远程 `--host 0.0.0.0` / 局域网部署**
+
+1. 主机用可被访问的绑定启动 dsh（例如 `dsh web --host 0.0.0.0`）。`/ext/bridge-config` 会按请求的 `Host`（以及存在时的 `X-Forwarded-*`）返回 `wsUrl`。访问 `http://192.168.2.185:3080/ext/bridge-config` 会得到 `ws://192.168.2.185:3080/ext/bridge`，而不再是回环地址。
+2. 客户端打开侧栏设置，把桥地址写成 `ws://<主机IP>:3080/ext/bridge`，并粘贴主机上 `~/.dsh/ext-bridge-token` 的桥接 token。扩展默认 CSP 已允许任意 `ws`/`http(s)` 主机，无需为局域网 IP 重新打包。
+
+不要把 `dsh web --host 0.0.0.0` 暴露在不信任的网络上。可选：构建时仍可用 `EXT_CONNECT_SRC` 追加额外 origin，以便收紧或定制 CSP。
+
 ## 开发
 
 桥接插件和 Chrome/Firefox 扩展都属于本仓库 workspace；所有命令均在本仓库根目录执行。首次开发安装运行 `pnpm install`。

@@ -1,7 +1,8 @@
-import { copyFileSync, cpSync, mkdirSync } from 'node:fs'
+import { copyFileSync, cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import tsconfigPaths from 'vite-tsconfig-paths'
 import { defineConfig } from 'vite'
+import { appendConnectSrc } from './src/connect-src.ts'
 
 /**
  * Shared build plumbing for the extension's three targets (background ES
@@ -19,12 +20,31 @@ export const targetManifest = browserTarget === 'firefox' ? 'manifest.firefox.js
 
 export const outDir = resolve(import.meta.dirname, browserTarget === 'firefox' ? 'dist-firefox' : 'dist')
 
+export { appendConnectSrc }
+
 /** Copy manifest, locale catalogs, and icons into the target's outDir. */
 export const copyManifest = {
   name: 'copy-manifest',
   closeBundle(): void {
     mkdirSync(outDir, { recursive: true })
-    copyFileSync(resolve(import.meta.dirname, targetManifest), resolve(outDir, 'manifest.json'))
+    const source = resolve(import.meta.dirname, targetManifest)
+    const dest = resolve(outDir, 'manifest.json')
+    const extras = process.env.EXT_CONNECT_SRC?.trim() ?? ''
+    if (extras === '') {
+      copyFileSync(source, dest)
+    } else {
+      const manifest = JSON.parse(readFileSync(source, 'utf8')) as {
+        content_security_policy?: { extension_pages?: string }
+      }
+      const csp = manifest.content_security_policy?.extension_pages
+      if (typeof csp === 'string') {
+        manifest.content_security_policy = {
+          ...manifest.content_security_policy,
+          extension_pages: appendConnectSrc(csp, extras),
+        }
+      }
+      writeFileSync(dest, `${JSON.stringify(manifest, null, 2)}\n`)
+    }
     cpSync(resolve(import.meta.dirname, '_locales'), resolve(outDir, '_locales'), { recursive: true })
     cpSync(resolve(import.meta.dirname, 'assets'), resolve(outDir, 'assets'), { recursive: true })
   },

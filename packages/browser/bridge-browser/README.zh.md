@@ -50,6 +50,7 @@ npx @deepseek-ai/dsh@0.2.0-rc.2 web
 - 桥路径在 `/api` 信任栅栏**之外**（栅栏只罩 client-connection 注册的路由），因此自带 bearer token 认证：首帧必须是 `hello`（5 秒内），常量时间比对，失败即断开。
 - `/api` 载体钉在回环上的方法（`settings.*`、`credentials.*`、`host.pickDirectory`、`host.openPath`）对非回环来源**即使 token 正确也拒绝**——对 `--host 0.0.0.0` 部署的纵深防御。
 - 同一时刻仅一个活动连接，新认证连接顶替旧连接。
+- `/ext/bridge-config` 按请求的 `Host`（以及存在时的 `X-Forwarded-Host` / `X-Forwarded-Proto`）生成 `wsUrl`，避免局域网客户端被要求去连本机 `127.0.0.1`。
 - 桥是 confused-deputy 边界而非通用认证层：不要把 `dsh web --host 0.0.0.0` 暴露在不信任的网络上。
 - 抽取的页面文字会标记为模型的不可信输入。页面读取遵循扩展的询问/自动/关闭策略；状态变更工具必须经过按 origin 的侧边栏决策，没有侧边栏时失败关闭。同源后续操作可只在当前侧栏会话中临时信任，永久信任仍需显式设置。
 

@@ -68,7 +68,7 @@
     }
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:* http://127.0.0.1:* https://raw.githubusercontent.com"
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' ws: wss: http: https:"
   },
   "icons": {
     "16": "assets/icons/icon16.png",

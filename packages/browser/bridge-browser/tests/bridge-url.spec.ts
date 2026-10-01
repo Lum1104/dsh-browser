@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
-import { bridgeWsUrlFromLocation, resolveBridgeWsUrl } from '../src/bridge-url.ts'
+import {
+  bridgeWsUrlFromHttpHost,
+  bridgeWsUrlFromLocation,
+  resolveBridgeWsUrl,
+} from '../src/bridge-url.ts'
 
 describe('bridgeWsUrlFromLocation', () => {
   it('builds a loopback ws URL and normalizes localhost', () => {
@@ -25,6 +29,28 @@ describe('bridgeWsUrlFromLocation', () => {
       port: '',
       host: 'example.com',
     })).toBe('wss://example.com/ext/bridge')
+  })
+})
+
+describe('bridgeWsUrlFromHttpHost', () => {
+  it('falls back to loopback when Host is missing', () => {
+    expect(bridgeWsUrlFromHttpHost(undefined, { fallbackPort: 3080 }))
+      .toBe('ws://127.0.0.1:3080/ext/bridge')
+  })
+
+  it('uses the request Host for LAN / remote discovery', () => {
+    expect(bridgeWsUrlFromHttpHost('192.168.2.185:3080', { fallbackPort: 3080 }))
+      .toBe('ws://192.168.2.185:3080/ext/bridge')
+  })
+
+  it('normalizes localhost and honors X-Forwarded-style secure flag', () => {
+    expect(bridgeWsUrlFromHttpHost('localhost:3080', { fallbackPort: 9999, secure: true }))
+      .toBe('wss://127.0.0.1:3080/ext/bridge')
+  })
+
+  it('parses IPv6 Host values', () => {
+    expect(bridgeWsUrlFromHttpHost('[::1]:3080', { fallbackPort: 3080 }))
+      .toBe('ws://[::1]:3080/ext/bridge')
   })
 })
 

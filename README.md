@@ -150,6 +150,13 @@ Local Chrome use requires no configuration; Firefox requires the local bridge to
 - Verify the bridge is loaded: open `http://127.0.0.1:3080/ext/bridge-config`. It should return JSON such as `{"wsUrl":"ws://127.0.0.1:3080/ext/bridge"}`. If it returns a web page instead of JSON, the running dsh predates the bridge registration — restart dsh and refresh the page; the extension reconnects on its own.
 - The extension probes ports 3080, 3081, 3090, and 14389 automatically. If dsh runs on another port — or you use a remote `--host 0.0.0.0` deployment — set the address (and bridge token) in the panel settings. Firefox always requires the token.
 
+**Remote `--host 0.0.0.0` / LAN deployments**
+
+1. On the host, run dsh with a reachable bind (for example `dsh web --host 0.0.0.0`). `/ext/bridge-config` answers with a `wsUrl` derived from the request `Host` (and `X-Forwarded-*` when present), so `http://192.168.2.185:3080/ext/bridge-config` returns `ws://192.168.2.185:3080/ext/bridge` instead of loopback.
+2. On the client, open the side-panel settings, set the bridge address to `ws://<host-ip>:3080/ext/bridge`, and paste the bridge token from `~/.dsh/ext-bridge-token` on the host. The extension `connect-src` CSP already allows any `ws`/`http(s)` host, so no rebuild is required.
+
+Do not expose `dsh web --host 0.0.0.0` on untrusted networks. Optional: `EXT_CONNECT_SRC` can still append extra origins at build time if you need a tighter or custom CSP.
+
 ## Development
 
 The bridge plugin and Chrome/Firefox extension are both members of this repository's workspace. Run all commands from the repository root. For the first development installation, run `pnpm install`.
