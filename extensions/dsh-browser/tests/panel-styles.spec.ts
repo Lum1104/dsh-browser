@@ -21,4 +21,17 @@ describe('panel layout styles', () => {
     expect(settingsChildrenRule).toBeDefined()
     expect(settingsChildrenRule).toMatch(/(?:^|\n)\s*flex-shrink:\s*0;/)
   })
+
+  it('places an upward model menu on its own row under the composer', () => {
+    const styles = readFileSync(`${process.cwd()}/src/panel/styles.css`, 'utf8')
+    const modelRule = styles.match(/\.composer-model\s*\{([^}]*)\}/)?.[1]
+    const menuRule = styles.match(/\.composer-model-menu\s*\{([^}]*)\}/)?.[1]
+
+    expect(modelRule).toBeDefined()
+    expect(modelRule).toMatch(/(?:^|\n)\s*position:\s*relative;/)
+    expect(modelRule).toMatch(/(?:^|\n)\s*margin-top:\s*8px;/)
+    expect(menuRule).toBeDefined()
+    expect(menuRule).toMatch(/(?:^|\n)\s*position:\s*absolute;/)
+    expect(menuRule).toMatch(/(?:^|\n)\s*bottom:\s*calc\(100% \+ 6px\);/)
+  })
 })

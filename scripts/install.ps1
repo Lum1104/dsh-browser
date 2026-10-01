@@ -513,6 +513,6 @@ Write-Pair "• 扩展会自动发现本机 dsh，无需填写地址或 token" "
 $QuotedRoot = "'" + $Root.Replace("'", "''") + "'"
 Write-Host ("• 启动固定版本：cd {0}; pnpm start" -f $QuotedRoot)
 Write-Host ("   Start the pinned version: cd {0}; pnpm start" -f $QuotedRoot)
-Write-Pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.2.0-rc.1 web" "Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.0-rc.1 web"
+Write-Pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.2.0-rc.2 web" "Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.0-rc.2 web"
 Write-Host ''
 Write-Pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/Lum1104/dsh-browser" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/Lum1104/dsh-browser"

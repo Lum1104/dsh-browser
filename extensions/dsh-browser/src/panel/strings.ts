@@ -181,6 +181,8 @@ export interface PanelCopy {
     disconnectedPlaceholder: string
     composerHelp: string
     sendMessage: string
+    selectModel: string
+    noModelsConfigured: string
     stopTurn: string
     stoppingTurn: string
     addImages: string
@@ -207,6 +209,7 @@ export interface PanelCopy {
     selectionAttached: string
     selectionTruncated: string
     removeSelection: string
+    scrollToBottom: string
   }
 }
 
@@ -411,6 +414,8 @@ const EN: PanelCopy = {
     disconnectedPlaceholder: 'Connect to dsh to get started',
     composerHelp: 'Enter to send · Shift + Enter for a new line',
     sendMessage: 'Send message',
+    selectModel: 'Model',
+    noModelsConfigured: 'No models yet — Host has no routable models.',
     stopTurn: 'Stop generating',
     stoppingTurn: 'Stopping…',
     addImages: 'Add images',
@@ -437,6 +442,7 @@ const EN: PanelCopy = {
     selectionAttached: 'Selected text',
     selectionTruncated: '(truncated)',
     removeSelection: 'Remove the selected text',
+    scrollToBottom: 'Scroll to latest',
   },
 }
 
@@ -641,6 +647,8 @@ const ZH: PanelCopy = {
     disconnectedPlaceholder: '连接 dsh 后即可开始',
     composerHelp: 'Enter 发送 · Shift + Enter 换行',
     sendMessage: '发送消息',
+    selectModel: '模型',
+    noModelsConfigured: '暂无模型 — Host 尚未提供可用模型。',
     stopTurn: '停止生成',
     stoppingTurn: '正在停止…',
     addImages: '添加图片',
@@ -667,6 +675,7 @@ const ZH: PanelCopy = {
     selectionAttached: '选中的网页内容',
     selectionTruncated: '（已截断）',
     removeSelection: '移除选中内容',
+    scrollToBottom: '回到最新消息',
   },
 }
 

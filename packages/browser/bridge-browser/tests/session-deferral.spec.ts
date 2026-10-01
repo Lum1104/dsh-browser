@@ -153,6 +153,124 @@ describe('withSessionDeferral', () => {
     expect(sessionPrompt).toHaveBeenCalledOnce()
   })
 
+  it('serves provisional model catalogs from session.models and defers selectModel', async () => {
+    const { api, call } = apiHarness()
+    call.mockImplementation(async (request: HostRpcCall): Promise<HostRpcResult> => {
+      if (request.method === 'session.create') {
+        return { ok: true, value: { sessionId: (request.payload as { sessionId: string }).sessionId } }
+      }
+      if (request.method === 'session.prompt') return { ok: true, value: { accepted: true } }
+      if (request.method === 'session.models') {
+        return {
+          ok: true,
+          value: {
+            current: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+            routable: true,
+            groups: [{
+              id: 'deepseek-official',
+              name: 'DeepSeek',
+              models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }],
+            }],
+            failures: [],
+          },
+        }
+      }
+      if (request.method === 'session.selectModel') {
+        return { ok: true, value: { selected: request.payload } }
+      }
+      return { ok: false, error: { code: 'not-found', message: request.method, details: {} } }
+    })
+    const wrapped = withSessionDeferral(api, true)
+    const id = await provisionalId(wrapped)
+
+    await expect(wrapped.call(request('session.models', { sessionId: id }))).resolves.toEqual({
+      ok: true,
+      value: {
+        current: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+        routable: true,
+        groups: [{
+          id: 'deepseek-official',
+          name: 'DeepSeek',
+          models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }],
+        }],
+        failures: [],
+      },
+    })
+
+    await expect(wrapped.call(request('session.selectModel', {
+      sessionId: id,
+      provider: 'deepseek-official',
+      model: 'deepseek-v4-pro',
+    }))).resolves.toEqual({
+      ok: true,
+      value: { selected: { provider: 'deepseek-official', model: 'deepseek-v4-pro' } },
+    })
+
+    await wrapped.call(request('session.prompt', { sessionId: id, mode: 'queue', content: [] }, 'prompt'))
+    expect(call).toHaveBeenCalledWith(expect.objectContaining({
+      method: 'session.selectModel',
+      payload: { sessionId: id, provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+    }))
+  })
+
+  it.each(['business failure', 'exception'])('blocks prompts after a model %s and retries without recreating the Session', async (kind) => {
+    const { api, call, sessionCreate, sessionPrompt, sessionHistory } = apiHarness()
+    const original = call.getMockImplementation()!
+    const failure = { ok: false as const, error: { code: 'session/model-unavailable', message: 'model unavailable', details: {} } }
+    const select = vi.fn<() => Promise<HostRpcResult>>()
+    if (kind === 'exception') select.mockRejectedValueOnce(new Error('model unavailable'))
+    else select.mockResolvedValueOnce(failure)
+    select.mockResolvedValue({ ok: true, value: { selected: { provider: 'p', model: 'chosen' } } })
+    call.mockImplementation((request) => request.method === 'session.selectModel' ? select() : original(request))
+    const wrapped = withSessionDeferral(api, true)
+    const id = await provisionalId(wrapped)
+    await wrapped.call(request('session.selectModel', { sessionId: id, provider: 'p', model: 'chosen' }))
+
+    const first = wrapped.call(request('session.prompt', { sessionId: id }, 'first'))
+    if (kind === 'exception') await expect(first).rejects.toThrow('model unavailable')
+    else await expect(first).resolves.toEqual(failure)
+    expect(sessionPrompt).not.toHaveBeenCalled()
+    await wrapped.call(request('session.history', { sessionId: id }))
+    expect(sessionHistory).toHaveBeenCalledOnce()
+
+    // Expiry must not discard the choice after creation has already succeeded.
+    vi.useFakeTimers()
+    vi.advanceTimersByTime(31 * 60_000)
+    await provisionalId(wrapped, 'another-session')
+    await expect(wrapped.call(request('session.prompt', { sessionId: id }, 'retry')))
+      .resolves.toEqual({ ok: true, value: { accepted: true } })
+    expect(sessionCreate).toHaveBeenCalledOnce()
+    expect(select).toHaveBeenCalledTimes(2)
+    expect(sessionPrompt).toHaveBeenCalledOnce()
+  })
+
+  it('holds concurrent prompts until the latest deferred choice is installed', async () => {
+    const { api, call, sessionCreate, sessionPrompt } = apiHarness()
+    const original = call.getMockImplementation()!
+    let release: ((result: HostRpcResult) => void) | undefined
+    const select = vi.fn(async (): Promise<HostRpcResult> => ({ ok: true, value: {} }))
+      .mockImplementationOnce(() => new Promise((resolve) => { release = resolve }))
+    call.mockImplementation((request) => request.method === 'session.selectModel' ? select() : original(request))
+    const wrapped = withSessionDeferral(api, true)
+    const id = await provisionalId(wrapped)
+    await wrapped.call(request('session.selectModel', { sessionId: id, provider: 'p', model: 'first-choice' }))
+    const first = wrapped.call(request('session.prompt', { sessionId: id }, 'first'))
+    await vi.waitFor(() => { expect(release).toBeDefined() })
+    const second = wrapped.call(request('session.prompt', { sessionId: id }, 'second'))
+    await wrapped.call(request('session.selectModel', { sessionId: id, provider: 'p', model: 'latest-choice' }))
+    expect(sessionPrompt).not.toHaveBeenCalled()
+    release?.({ ok: true, value: {} })
+    await Promise.all([first, second])
+    expect(sessionCreate).toHaveBeenCalledOnce()
+    expect(select).toHaveBeenCalledTimes(2)
+    expect(sessionPrompt).toHaveBeenCalledTimes(2)
+    expect(call.mock.calls.filter(([request]) => request.method === 'session.selectModel')
+      .map(([request]) => request.payload)).toEqual([
+      { sessionId: id, provider: 'p', model: 'first-choice' },
+      { sessionId: id, provider: 'p', model: 'latest-choice' },
+    ])
+  })
+
   it('prunes stale provisional entries and returns the original API when disabled', async () => {
     vi.useFakeTimers()
     const { api, sessionHistory } = apiHarness()
