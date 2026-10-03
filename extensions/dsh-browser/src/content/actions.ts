@@ -393,9 +393,38 @@ async function pressAction(args: Record<string, unknown>, ctx: ActionContext): P
   return withPageDelta(`Sent key "${key}".`, ctx)
 }
 
-async function scrollAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
-  const direction = typeof args.direction === 'string' ? args.direction : ''
-  const amount = typeof args.amount === 'number' ? args.amount : Math.floor(window.innerHeight * 0.8)
+/** Directions `browser_scroll` accepts. */
+type ScrollDirection = 'up' | 'down' | 'top' | 'bottom'
+
+function isScrollDirection(value: unknown): value is ScrollDirection {
+  return value === 'up' || value === 'down' || value === 'top' || value === 'bottom'
+}
+
+/**
+ * Nearest ancestor — the element itself included — that actually scrolls
+ * vertically. Nested app shells (chat transcripts, side panes, modal bodies)
+ * keep their own overflow container, so a `window` scroll never reaches them
+ * and the app never receives the scroll event its lazy loading waits for.
+ */
+function nearestScrollable(el: Element | null): HTMLElement | null {
+  for (let node: Element | null = el; node !== null && node !== document.body; node = node.parentElement) {
+    if (!(node instanceof HTMLElement)) continue
+    const overflowY = getComputedStyle(node).overflowY
+    if (overflowY !== 'auto' && overflowY !== 'scroll' && overflowY !== 'overlay') continue
+    if (node.scrollHeight > node.clientHeight + 1) return node
+  }
+  return null
+}
+
+/** Short, stable container description for the status line. */
+function describeContainer(box: HTMLElement): string {
+  const id = box.id === '' ? '' : `#${box.id}`
+  const role = box.getAttribute('role')
+  return `${box.tagName.toLowerCase()}${id}${role === null ? '' : `[role="${role}"]`}`
+}
+
+/** Scroll the document itself: the only behavior this action had before targeting. */
+function scrollDocument(direction: ScrollDirection, amount: number): void {
   switch (direction) {
     case 'top':
       window.scrollTo({ top: 0, behavior: 'instant' })
@@ -409,11 +438,71 @@ async function scrollAction(args: Record<string, unknown>, ctx: ActionContext): 
     case 'down':
       window.scrollBy({ top: amount, behavior: 'instant' })
       break
-    default:
-      throw new ActionError('bad-args', `direction must be up, down, top, or bottom; received "${direction}".`)
   }
+}
+
+async function scrollAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
+  const direction = args.direction
+  if (!isScrollDirection(direction)) {
+    throw new ActionError('bad-args', `direction must be up, down, top, or bottom; received "${String(direction)}".`)
+  }
+  const amount = typeof args.amount === 'number' ? args.amount : Math.floor(window.innerHeight * 0.8)
+  const selector = typeof args.selector === 'string' && args.selector !== '' ? args.selector : undefined
+  const hasIndex = args.index !== undefined
+  if (hasIndex && selector !== undefined) {
+    throw new ActionError('bad-args', 'Provide either index or selector, not both.')
+  }
+
+  // No target: keep the original page-level behavior exactly as it was.
+  if (!hasIndex && selector === undefined) {
+    scrollDocument(direction, amount)
+    await waitForPageSettled(SCROLL_SETTLE)
+    return withPageDelta(`Scrolled ${direction}.`, ctx)
+  }
+
+  const index = hasIndex ? numberArg(args, 'index') : undefined
+  let anchor: Element
+  if (index !== undefined) {
+    anchor = elementOrThrow(ctx.ids, index)
+  } else {
+    let found: Element | null
+    try {
+      found = document.querySelector(selector as string)
+    } catch {
+      throw new ActionError('bad-args', `selector is not a valid CSS selector: ${String(selector)}`)
+    }
+    if (found === null) throw new ActionError('action-failed', `No element matched selector: ${String(selector)}`)
+    anchor = found
+  }
+  const label = index !== undefined ? `element [${index}]` : `selector ${String(selector)}`
+
+  const box = nearestScrollable(anchor)
+  if (box === null) {
+    scrollDocument(direction, amount)
+    await waitForPageSettled(SCROLL_SETTLE)
+    return withPageDelta(
+      `Scrolled ${direction}; ${label} has no scrollable container, so the page scrolled instead.`,
+      ctx,
+    )
+  }
+
+  const before = box.scrollTop
+  if (direction === 'top') box.scrollTop = 0
+  else if (direction === 'bottom') box.scrollTop = box.scrollHeight
+  else box.scrollTop += direction === 'up' ? -amount : amount
+  // Moving scrollTop relocates the container but tells listeners nothing, and a
+  // synthetic wheel event does not scroll by itself. Replay the gesture after
+  // the move so apps that gate lazy loading on `wheel` still fire.
+  const wheelDelta = direction === 'up' || direction === 'top' ? -amount : amount
+  if (typeof WheelEvent === 'function') {
+    box.dispatchEvent(new WheelEvent('wheel', { deltaY: wheelDelta, bubbles: true, cancelable: true }))
+  }
+
   await waitForPageSettled(SCROLL_SETTLE)
-  return withPageDelta(`Scrolled ${direction}.`, ctx)
+  return withPageDelta(
+    `Scrolled ${direction} inside ${describeContainer(box)} (${before} to ${box.scrollTop}).`,
+    ctx,
+  )
 }
 
 async function navigateAction(args: Record<string, unknown>): Promise<ActionResult> {

@@ -97,6 +97,10 @@ describe('registerBrowserTools', () => {
     expect(requestTool).toHaveBeenLastCalledWith('browser_scroll', { direction: 'top' }, exec.signal, 1_000)
     await run('browser_scroll', { direction: 'down', frame: 4 })
     expect(requestTool).toHaveBeenLastCalledWith('browser_scroll', { direction: 'down', frame: 4 }, exec.signal, 1_000)
+    await run('browser_scroll', { direction: 'up', index: 7 })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_scroll', { direction: 'up', index: 7 }, exec.signal, 1_000)
+    await run('browser_scroll', { direction: 'bottom', selector: '#pane' })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_scroll', { direction: 'bottom', selector: '#pane' }, exec.signal, 1_000)
 
     await run('browser_navigate', { url: 'https://example.com' })
     expect(requestTool).toHaveBeenLastCalledWith('browser_navigate', { url: 'https://example.com' }, exec.signal, 1_000)

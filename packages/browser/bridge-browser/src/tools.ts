@@ -180,19 +180,23 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const scroll = (): ToolDefinition => defineTool({
     name: 'browser_scroll',
-    description: 'Scroll up, down, top, or bottom; amount is optional pixels.',
+    description: 'Scroll up, down, top, or bottom; amount is optional pixels. Pass index or selector to scroll inside a nested scroll container (an app pane, chat transcript, or modal body) instead of the page.',
     parameters: {
       direction: { type: 'string', required: true, enum: ['up', 'down', 'top', 'bottom'], description: 'Scroll direction.' },
       amount: { type: 'number', description: 'Number of pixels to scroll; ignored for top and bottom.' },
+      index: { type: 'number', description: 'Element index from browser_snapshot; scrolls the nearest scrollable container of that element.' },
+      selector: { type: 'string', description: 'CSS selector; scrolls the nearest scrollable container of the first match.' },
       frame: FRAME_PARAMETER,
     },
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => {
-      const a = args as { direction: 'up' | 'down' | 'top' | 'bottom'; amount?: number; frame?: number }
+      const a = args as { direction: 'up' | 'down' | 'top' | 'bottom'; amount?: number; index?: number; selector?: string; frame?: number }
       return call(exec, 'browser_scroll', {
         direction: a.direction,
         ...a.amount !== undefined ? { amount: a.amount } : {},
+        ...a.index !== undefined ? { index: a.index } : {},
+        ...a.selector !== undefined ? { selector: a.selector } : {},
         ...a.frame !== undefined ? { frame: a.frame } : {},
       })
     },
