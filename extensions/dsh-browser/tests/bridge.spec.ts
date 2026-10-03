@@ -127,4 +127,31 @@ describe('BridgeClient connection probe', () => {
     expect(states.at(-1)).toBe('stopped')
     expect(FakeWebSocket.instances).toHaveLength(1)
   })
+
+  it('rediscovers a new URL after repeated probe failures and resets backoff', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const states: BridgeState[] = []
+    let probes = 0
+    const resolveUrl = vi.fn(async () => 'ws://127.0.0.1:50403/ext/bridge')
+    const client = new BridgeClient({
+      onStateChange: (state) => { states.push(state) },
+      onFrame: () => {},
+      onHelloOk: () => {},
+    }, async () => {
+      probes += 1
+      return probes > 3
+    }, () => true, resolveUrl)
+
+    client.start('ws://127.0.0.1:3080/ext/bridge', '')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(states.at(-1)).toBe('reconnecting')
+    await vi.advanceTimersByTimeAsync(30_000)
+
+    expect(resolveUrl).toHaveBeenCalled()
+    expect(client.currentUrl).toBe('ws://127.0.0.1:50403/ext/bridge')
+    expect(states).toContain('connecting')
+    expect(FakeWebSocket.instances.some((socket) => socket.url.includes('50403'))).toBe(true)
+    client.stop()
+  })
 })

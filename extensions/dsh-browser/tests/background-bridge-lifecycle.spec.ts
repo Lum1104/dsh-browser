@@ -239,7 +239,14 @@ describe('background bridge lifecycle', () => {
       type: 'settings',
       settings: { bridgeUrl: 'ws://127.0.0.1:3081', token: 'new-token' },
     })
-    await vi.waitFor(() => { expect(chrome.storage.local.set).toHaveBeenCalledOnce() })
+    await vi.waitFor(() => {
+      expect(chrome.storage.local.set).toHaveBeenCalledWith(expect.objectContaining({
+        dshSettings: expect.objectContaining({
+          bridgeUrl: 'ws://127.0.0.1:3081',
+          token: 'new-token',
+        }),
+      }))
+    })
     panel.onDisconnect.emit()
     expect(originalSocket.readyState).toBe(FakeWebSocket.OPEN)
 

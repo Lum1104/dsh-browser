@@ -67,7 +67,9 @@ function mockChrome() {
     },
     storage: {
       local: {
-        get: vi.fn(async () => ({})),
+        get: vi.fn(async () => ({
+          dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' },
+        })),
         set: vi.fn(async () => {}),
       },
       session: {
@@ -86,7 +88,7 @@ function mockChrome() {
       onRemoved: chromeEvent<[number]>(),
     },
     webNavigation: {
-      onCommitted: chromeEvent<[{ tabId: number; frameId: number }]>(),
+      onCommitted: chromeEvent<[{ tabId: number; frameId: number; url?: string }]>(),
     },
     windows: {
       WINDOW_ID_NONE: -1,
@@ -99,9 +101,18 @@ function mockChrome() {
 
 async function connectPanelForTest() {
   const chromeMock = mockChrome()
-  vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 503 })))
+  vi.stubGlobal('WebSocket', class extends EventTarget {
+    static CONNECTING = 0
+    static OPEN = 1
+    static CLOSED = 3
+    readyState = 0
+    send(): void {}
+    close(): void {}
+    constructor(public url: string) {
+      super()
+    }
+  })
   await import('../src/background/index.ts')
-  await vi.waitFor(() => { expect(chromeMock.query).toHaveBeenCalled() })
 
   const panel = panelPort()
   chromeMock.onConnect.emit(panel.port)
@@ -109,6 +120,7 @@ async function connectPanelForTest() {
     expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity' }))
   })
   panel.postMessage.mockClear()
+  chromeMock.query.mockClear()
   return { ...chromeMock, ...panel }
 }
 
@@ -211,13 +223,14 @@ describe('background tab-affinity rebind protocol', () => {
       expect(postMessage).toHaveBeenCalledWith({ type: 'tab-affinity.rebind.result', id: 'initial-bind', ok: true })
     })
     postMessage.mockClear()
+    query.mockClear()
 
     let finishQuery!: (tabs: chrome.tabs.Tab[]) => void
     query.mockImplementationOnce(async () => await new Promise<chrome.tabs.Tab[]>((resolve) => {
       finishQuery = resolve
     }))
     onMessage.emit({ type: 'tab-affinity.rebind', id: 'disconnected-rebind' })
-    await vi.waitFor(() => { expect(query).toHaveBeenCalledTimes(4) })
+    await vi.waitFor(() => { expect(query).toHaveBeenCalled() })
     onDisconnect.emit()
     finishQuery([tab(2)])
     await Promise.resolve()

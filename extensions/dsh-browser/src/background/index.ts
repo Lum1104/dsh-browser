@@ -39,8 +39,16 @@ import {
   type RespondResult,
 } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import { BRIDGE_CONFIG_PATH, BRIDGE_PATH } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { BridgeClient, type BridgeState } from './bridge.ts'
+import {
+  createChromeAutoCacheIo,
+  isLoopbackHttpUrl,
+  normalizeBridgeUrl,
+  probeBridgeConfig,
+  rememberAutoBridgeUrl,
+  resolveBridgeUrl,
+  type BridgeDiscoveryDeps,
+} from './bridge-discovery.ts'
 import { createRpc } from './rpc.ts'
 import {
   dispatchOpenTab,
@@ -107,51 +115,42 @@ const SETTINGS_DEFAULTS: Settings = {
   autoResumeSession: true,
 }
 
-/**
- * 自动探测的候选端口：
- * - dsh web（CLI）默认 3080，端口被占时依次回退 3081 / 3090；
- * - DSH Desktop 默认由系统随机分配本地 Web 端口（`dsh-desktop.port: 0`），
- *   用户指南推荐固定为 43189（见 deepseek-harness-desktop docs/user-guide）；
- * - 14389 为历史桌面应用端口，保留兼容旧版。
- */
-const DISCOVERY_PORTS = [3080, 3081, 3090, 14389, 43189]
+/** Legacy default that used to be written as a "manual" override; treat as empty. */
 const LEGACY_LOCAL_URL = 'ws://127.0.0.1:3080'
 
-/** 探测本机 dsh 的桥地址：fetch /ext/bridge-config 直到成功。 */
-async function discoverBridge(shouldContinue: () => boolean = () => true): Promise<string | undefined> {
-  for (const port of DISCOVERY_PORTS) {
-    if (!shouldContinue()) return undefined
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/ext/bridge-config`, {
-        signal: AbortSignal.timeout(1_500),
-      })
-      if (!shouldContinue()) return undefined
-      if (!response.ok) continue
-      const body = await response.json() as { wsUrl?: unknown }
-      if (typeof body.wsUrl === 'string' && body.wsUrl.startsWith('ws://')) return body.wsUrl
-    } catch {
-      // 该端口没有 dsh 或未挂桥：试下一个。
-    }
-  }
-  return undefined
+const autoCacheIo = createChromeAutoCacheIo()
+
+const discoveryDeps: BridgeDiscoveryDeps = {
+  probe: probeBridgeConfig,
+  loadAuto: autoCacheIo.loadAuto,
+  saveAuto: autoCacheIo.saveAuto,
+  queryLoopbackTabs: async () => chrome.tabs.query({ url: ['http://127.0.0.1/*', 'http://localhost/*'] }),
+  now: Date.now,
+  fetchImpl: fetch,
 }
 
 /** Avoid opening a noisy loopback WebSocket until the local bridge responds. */
 async function probeBridge(url: string): Promise<boolean> {
-  try {
-    const target = new URL(url)
-    if (target.hostname !== '127.0.0.1') return true
-    target.protocol = target.protocol === 'wss:' ? 'https:' : 'http:'
-    target.pathname = BRIDGE_CONFIG_PATH
-    target.search = ''
-    target.hash = ''
-    const response = await fetch(target, { signal: AbortSignal.timeout(1_500) })
-    if (!response.ok) return false
-    const body = await response.json() as { wsUrl?: unknown }
-    return typeof body.wsUrl === 'string' && body.wsUrl.startsWith('ws://')
-  } catch {
-    return false
+  return probeBridgeConfig(url)
+}
+
+async function persistAutoBridgeUrl(url: string): Promise<void> {
+  await rememberAutoBridgeUrl(url, autoCacheIo.saveAuto, autoCacheIo.loadAuto)
+}
+
+/**
+ * Re-run layered discovery while the panel lease is active.
+ * Manual bridgeUrl always wins and is never overwritten.
+ */
+async function resolveActiveBridgeUrl(
+  shouldContinue: () => boolean,
+): Promise<{ url: string; auto: boolean } | undefined> {
+  const resolved = await resolveBridgeUrl(settings.bridgeUrl, shouldContinue, discoveryDeps)
+  if (resolved === undefined) return undefined
+  if (resolved.source !== 'manual') {
+    console.info(`[dsh-browser] resolved bridge ${resolved.url} via ${resolved.source}`)
   }
+  return { url: resolved.url, auto: resolved.source !== 'manual' }
 }
 
 const STORAGE_KEY = 'dshSettings'
@@ -1228,29 +1227,20 @@ function cancelAllToolCalls(): void {
 async function startBridge(): Promise<void> {
   const revision = ++bridgeStartRevision
   if (panelPorts.size === 0) return
-  let url = settings.bridgeUrl
-  if (url === '') {
-    url = await discoverBridge(() => revision === bridgeStartRevision && panelPorts.size > 0) ?? ''
-  }
+  const resolved = await resolveActiveBridgeUrl(
+    () => revision === bridgeStartRevision && panelPorts.size > 0,
+  )
   // Discovery is asynchronous. A panel may have closed or a newer settings
   // update may have started while its fetches were in flight.
   if (revision !== bridgeStartRevision || panelPorts.size === 0) return
-  if (url === '') {
+  if (resolved === undefined) {
     bridge?.stop()
     bridge = null
     rpc = null
     broadcastStatus()
     return
   }
-  // 手动填的地址常只有主机部分（如 ws://127.0.0.1:3080）；桥路径是协议
-  // 常量，缺省时自动补全，避免连到根路径失败。
-  try {
-    const parsed = new URL(url)
-    if (parsed.pathname === '' || parsed.pathname === '/') parsed.pathname = BRIDGE_PATH
-    url = parsed.toString()
-  } catch {
-    // 非法 URL 原样交给 WebSocket 构造函数报错。
-  }
+  const url = normalizeBridgeUrl(resolved.url)
   if (bridge === null) {
     const client = new BridgeClient({
       onStateChange: (state) => {
@@ -1277,12 +1267,36 @@ async function startBridge(): Promise<void> {
         caps = negotiated
         broadcastStatus()
         void pushBudgetToControlledTab(negotiated)
+        if (settings.bridgeUrl.trim() === '' && client.currentUrl !== '') {
+          void persistAutoBridgeUrl(client.currentUrl)
+        }
       },
-    }, probeBridge, () => panelPorts.size > 0)
+    }, probeBridge, () => panelPorts.size > 0, async (shouldContinue) => {
+      // Manual override never rediscovers into a different address.
+      if (settings.bridgeUrl.trim() !== '') return undefined
+      const next = await resolveActiveBridgeUrl(shouldContinue)
+      if (next !== undefined) void persistAutoBridgeUrl(next.url)
+      return next?.url
+    })
     bridge = client
     rpc = createRpc(client)
   }
   bridge.start(url, settings.token)
+}
+
+/** Debounced rediscovery when a loopback DSH page commits navigation. */
+let loopbackDiscoveryTimer: ReturnType<typeof setTimeout> | undefined
+function scheduleLoopbackBridgeRefresh(): void {
+  if (settings.bridgeUrl.trim() !== '') return
+  if (panelPorts.size === 0) return
+  if (loopbackDiscoveryTimer !== undefined) clearTimeout(loopbackDiscoveryTimer)
+  loopbackDiscoveryTimer = setTimeout(() => {
+    loopbackDiscoveryTimer = undefined
+    void settingsReady.then(() => {
+      if (settings.bridgeUrl.trim() !== '' || panelPorts.size === 0) return
+      void startBridge()
+    })
+  }, 400)
 }
 
 /** Gateway RPC with a helpful error when the bridge is down. */
@@ -1690,8 +1704,11 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // fragment update does not, and must not drop a quote still on the screen.
 // Matching the exact frame keeps an iframe's navigation from invalidating a
 // quote taken from its parent page, and vice versa.
-chrome.webNavigation.onCommitted.addListener(({ tabId, frameId }) => {
+chrome.webNavigation.onCommitted.addListener(({ tabId, frameId, url }) => {
   broadcastSelections(selections.clearTab(tabId, frameId))
+  if (frameId === 0 && typeof url === 'string' && isLoopbackHttpUrl(url)) {
+    scheduleLoopbackBridgeRefresh()
+  }
 })
 
 // Ports are cleaned up by their own disconnect; only the window's quote is
