@@ -83,6 +83,14 @@ export class BridgeToolError extends Error {
 export interface BridgeServerDeps {
   /** Bearer token the extension must present in `hello`. */
   token: string
+  /**
+   * Exact `chrome-extension://<id>` origins allowed to skip the bearer token
+   * on loopback. Trust is pinned per extension id, NOT by scheme prefix: any
+   * other installed extension can present its own chrome-extension:// Origin,
+   * so an unlisted origin must authenticate with the token. Fail-closed when
+   * empty (no origin receives the exemption).
+   */
+  trustedExtensionOrigins?: readonly string[]
   /** Active dsh Host adapter used for unary calls, events, and waterfalls. */
   api: BrowserHostApi
   /** Default per-tool-call timeout in ms. */
@@ -151,12 +159,18 @@ export function messageToText(data: Buffer | ArrayBuffer | Buffer[]): string {
  */
 export class BridgeServer {
   private readonly wss = new WebSocketServer({ noServer: true })
+  private readonly trustedOrigins: ReadonlySet<string>
   private current: ReadyConnection | null = null
   private readonly pendingTools = new Map<string, PendingTool>()
   private readonly orderedSessionRpcs = new Map<string, Promise<void>>()
   private closed = false
 
-  constructor(private readonly deps: BridgeServerDeps) {}
+  constructor(private readonly deps: BridgeServerDeps) {
+    // Built in the body (not as a field initializer): with
+    // useDefineForClassFields, initializers run before parameter properties
+    // are assigned, so `this.deps` is not available there.
+    this.trustedOrigins = new Set(deps.trustedExtensionOrigins)
+  }
 
   /**
    * Handle one HTTP upgrade for the bridge path.
@@ -291,19 +305,22 @@ export class BridgeServer {
           ws.close(1008, 'hello first')
           return
         }
-        // Zero-config local mode: loopback sockets skip the token (the
-        // extension auto-discovers the bridge and connects without setup).
-        // WebSockets have no same-origin policy, so a malicious page could
-        // open a cross-origin socket to 127.0.0.1 with a loopback remote —
-        // the loopback shortcut therefore requires a chrome-extension://
-        // Origin (only extension contexts can present one; pages cannot
-        // forge the header). Firefox moz-extension:// origins contain a
-        // per-install UUID rather than the manifest's stable Gecko ID, so
-        // they are not an identity boundary and must present the bearer token.
+        // Zero-config local mode: loopback sockets from the TRUSTED
+        // extension skip the token (the extension auto-discovers the bridge
+        // and connects without setup). WebSockets have no same-origin
+        // policy, so a malicious page could open a cross-origin socket to
+        // 127.0.0.1 with a loopback remote — pages cannot forge an Origin
+        // header, but ANY installed extension can present its own
+        // chrome-extension:// Origin. The exemption is therefore an
+        // exact-match allowlist of pinned extension ids; every other
+        // origin (unlisted extensions included) must present the bearer
+        // token. Firefox moz-extension:// origins contain a per-install
+        // UUID rather than the manifest's stable Gecko ID, so they are not
+        // an identity boundary and must present the bearer token.
         // Non-loopback remotes must also present the bearer token.
         const loopbackNoToken = isLoopbackAddress(remoteAddress)
           && typeof origin === 'string'
-          && origin.startsWith('chrome-extension://')
+          && this.trustedOrigins.has(origin)
         if (!loopbackNoToken && !verifyToken(this.deps.token, frame.token)) {
           ws.close(4002, 'bad token')
           return

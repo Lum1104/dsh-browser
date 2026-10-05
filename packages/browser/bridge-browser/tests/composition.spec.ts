@@ -139,6 +139,11 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
     `- name: '${BRIDGE}'`,
     '  config:',
     `    token: '${TOKEN}'`,
+    // The harness client presents this fake extension origin; the config
+    // override replaces the shipped-extension default with it so the real
+    // loader path (schema default → resolveConfig → BridgeServer) is what
+    // grants the exemption here.
+    `    trustedExtensionOrigins: ['${EXT_ORIGIN}']`,
     `    sessionWorkspacePath: '${join(root, 'browser-sessions')}'`,
     // This spec drives the raw gateway chain (create → real session); the
     // deferred-creation behavior is covered by its focused wrapper spec.
@@ -179,8 +184,8 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
   return { ctx: context, configPath, port: web.port }
 }
 
-/** 扩展上下文 Origin（回环免 token 的必要条件）。 */
-const EXT_ORIGIN = 'chrome-extension://test-extension-id'
+/** 扩展上下文 Origin（回环免 token 的必要条件）。必须是合法形状（32 位 a-p id）：resolveConfig 会校验。 */
+const EXT_ORIGIN = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop'
 
 function connect(port: number): Promise<{
   ws: WebSocket

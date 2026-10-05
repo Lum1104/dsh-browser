@@ -373,6 +373,7 @@ if [ "$CHROME_OPENED" -ne 1 ]; then
 fi
 if [ "$IS_UPDATE" -eq 1 ]; then
   print_pair "检测到已有扩展目录，文件已安全更新。" "Existing extension directory detected; its files were updated safely."
+  print_pair "若从 0.1.5 之前的版本升级：扩展 id 会因固定 manifest key 变更一次；如曾配置远程桥地址/token，请在面板中重新填写。" "Updating from pre-0.1.5: the extension id changes once (stable manifest key); re-enter the bridge address/token in the panel if you had configured a remote bridge."
   print_pair "打开 Google Chrome（注意不是 Edge/Firefox）：" "Open Google Chrome (not Edge/Firefox):"
   printf '\n'
   print_pair "    地址栏输入 chrome://extensions" "    Type chrome://extensions in the address bar"
