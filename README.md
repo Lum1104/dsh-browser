@@ -99,7 +99,7 @@ or, on Windows:
 $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 ```
 
-The installer downloads `main`, builds and registers the bridge plugin, builds the Chrome extension into `~/.dsh/browser-extension`, and opens `chrome://extensions`. On the first install, load that directory as an unpacked extension; on updates, click **Reload**. Restart dsh if it is already running.
+The installer downloads `main`, builds and registers the bridge plugin, builds the Chrome extension into `~/.dsh/browser-extension`, and opens `chrome://extensions`. On the first install, load that directory as an unpacked extension; on updates, click **Reload**. Restart dsh if it is already running. Note for updates from pre-0.1.5 builds: the extension now pins a stable manifest `key`, so its id (and the per-id stored settings) change once — re-enter the bridge address and token in the panel if you had configured a remote bridge.
 
 `scripts/install.sh` covers macOS and Linux, and `scripts/install.ps1` covers Windows; both write the same managed workspace and the same install metadata. The installer copies the extension path to the clipboard when a clipboard tool is available (`pbcopy`, `wl-copy`, `xclip`, `xsel`, or PowerShell's `Set-Clipboard`), and prints the path either way. When no Chrome or Chromium install is found, it prints the command that installs one; set `DSH_INSTALL_BROWSER=1` to let the installer attempt that install itself.
 
@@ -183,7 +183,8 @@ If you encounter `cache.hydratePrepared is not a function`, update the repositor
 ## Security
 
 - The bridge path sits outside the `/api` trust boundary and performs its own bearer-token authentication.
-- Local Chrome extension origins retain zero-configuration loopback access; Firefox origins are per-install UUIDs and must present the bearer token.
+- Zero-config loopback access is pinned to this extension's stable id (derived from the public manifest `key`); unlisted extensions must present the bearer token. The key is public, so the pin stops *incidental* cross-extension access — an extension deliberately copying the key inherits the id. Deployments that must resist hostile extensions should set `trustedExtensionOrigins: []` and pair the bearer token. Firefox origins are per-install UUIDs and always present the token.
+- The exemption is loopback-only. A reverse proxy terminating on 127.0.0.1 (`tailscale serve`, `ssh -L`, nginx) makes proxied clients appear as loopback — use the hardened mode above for such deployments.
 - Privileged gateway methods such as `settings.*`, `credentials.*`, and `host.open*` reject non-loopback sources.
 - The browser-page pipeline is text-only and never captures screenshots; explicitly attached chat images use dsh's durable attachment service. Password and payment-card values never leave the page.
 - When work begins, the assistant binds to the active tab (at prompt submission, or at the first direct browser-tool call). If you switch tabs manually, later browser actions pause and the side panel asks whether the assistant should continue on the original tab or follow the new one. Choosing the original tab permits background operation; the extension never silently retargets or changes your visible tab. Closing the controlled tab also pauses tools until you explicitly select the current page.

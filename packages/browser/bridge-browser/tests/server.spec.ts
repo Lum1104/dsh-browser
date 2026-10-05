@@ -45,6 +45,7 @@ async function startBridge(overrides: Partial<ConstructorParameters<typeof Bridg
     caps: { textOnly: true, snapshotMaxChars: 12_000, maxInteractiveItems: 60 },
     injectBrowserSnapshot: vi.fn(),
     purgeSession: vi.fn(async () => {}),
+    trustedExtensionOrigins: [EXT_ORIGIN],
     ...overrides,
   })
   const server = createServer()
@@ -129,7 +130,7 @@ describe('BridgeServer', () => {
     ws.close()
   })
 
-  it('accepts loopback connections without a token when Origin is an extension (zero-config mode)', async () => {
+  it('accepts loopback connections without a token when Origin is the trusted extension (zero-config mode)', async () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url, EXT_ORIGIN)
@@ -137,6 +138,54 @@ describe('BridgeServer', () => {
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     expect(frames.find((f) => f.t === 'hello.ok')).toBeDefined()
     ws.close()
+  })
+
+  it('rejects loopback connections without a token when Origin is an unlisted extension', async () => {
+    // Any other installed extension must not inherit the trusted extension's
+    // token exemption just by presenting a chrome-extension:// Origin.
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, done } = await connect(h.url, 'chrome-extension://some-other-extension')
+    send(ws, { t: 'hello', token: '', caps: CAPS })
+    await Promise.race([
+      done,
+      new Promise((_, reject) => { setTimeout(() => reject(new Error('unlisted extension origin was not rejected')), 1_000) }),
+    ])
+    expect(ws.readyState).toBe(WebSocket.CLOSED)
+    expect(h.bridge.hasConnection()).toBe(false)
+  })
+
+  it('accepts an unlisted extension origin that presents the token (custom builds)', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, frames } = await connect(h.url, 'chrome-extension://some-other-extension')
+    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
+    expect(frames.find((f) => f.t === 'hello.ok')).toBeDefined()
+    ws.close()
+  })
+
+  it('rejects a trusted extension origin from a non-loopback remote without the token', async () => {
+    // Origin trust alone is never sufficient: the exemption is loopback-only,
+    // so a remote client spoofing/presenting the pinned Origin still needs the token.
+    const h = await startBridge({ remoteAddressOverride: '192.168.1.5' })
+    harnesses.push(h)
+    const { ws, done } = await connect(h.url, EXT_ORIGIN)
+    send(ws, { t: 'hello', token: '', caps: CAPS })
+    await done
+    expect(ws.readyState).toBe(WebSocket.CLOSED)
+    expect(h.bridge.hasConnection()).toBe(false)
+  })
+
+  it('fails closed when no origin is trusted (hardened mode)', async () => {
+    // Explicit empty allowlist: even the pinned-origin shape gets no exemption.
+    const h = await startBridge({ trustedExtensionOrigins: [] })
+    harnesses.push(h)
+    const { ws, done } = await connect(h.url, EXT_ORIGIN)
+    send(ws, { t: 'hello', token: '', caps: CAPS })
+    await done
+    expect(ws.readyState).toBe(WebSocket.CLOSED)
+    expect(h.bridge.hasConnection()).toBe(false)
   })
 
   it('requires a token from Firefox extension origins because their UUID is not an extension identity', async () => {

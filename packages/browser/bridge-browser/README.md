@@ -11,6 +11,7 @@ The **browser-operation bridge** for dsh: mounts a token-authenticated WebSocket
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `token` | `string` | generated | Fixed bearer token. When absent, a token is generated on first boot, persisted at `~/.dsh/ext-bridge-token` (chmod 0600), and printed in the boot log. |
+| `trustedExtensionOrigins` | `string[]` | shipped extension id | Exact `chrome-extension://<id>` origins allowed to skip the token on loopback. The default pins the id derived from the extension manifest `key` (public — the pin stops incidental cross-extension access, not deliberate key-cloning impersonation); every other origin must present the token. `[]` disables the exemption (hardened mode: pair the token). Invalid entries fail startup. |
 | `toolTimeoutMs` | `number` | 90000 | Per-tool-call budget, leaving time for the extension's 60-second approval window. |
 | `snapshotMaxChars` | `number` | 32000 | Upper bound on one rendered snapshot's characters, minimum 500 (also negotiated to the extension via `hello.ok` caps). |
 | `maxInteractiveItems` | `number` | 60 | Upper bound on interactive inventory items per snapshot. |
@@ -43,13 +44,14 @@ The workspace pins dsh 0.2.0-rc.2, the minimum supported runtime. Older DSH rele
 npx @deepseek-ai/dsh@0.2.0-rc.2 web
 ```
 
-The installer copies the unpacked extension to `~/.dsh/browser-extension` and opens `chrome://extensions`. Load that stable directory in Chrome and use the side panel. Loopback connections are discovered automatically and require no token entry; non-loopback deployments still require the configured bearer token.
+The installer copies the unpacked extension to `~/.dsh/browser-extension` and opens `chrome://extensions`. Load that stable directory in Chrome and use the side panel. The shipped extension carries a stable manifest `key`, so its id — and therefore its token-exempt loopback access — stays constant across reinstalls and updates. Updating from a pre-0.1.5 build changes the id once (settings are stored per id): re-enter the bridge address and token in the panel if you had configured a remote bridge. Other installed extensions are not exempt and must present the configured bearer token; non-loopback deployments always require it.
 
 ## Security model
 
 - The bridge route lives **outside** the `/api` trust fence (which only guards client-connection's routes), so it carries its own bearer-token authentication: the first frame must be `hello` with the token within 5s, verified in constant time. Failed auth closes the socket.
 - Gateway methods the `/api` carrier pins to loopback (`settings.*`, `credentials.*`, `host.pickDirectory`, `host.openPath`) are refused for non-loopback remotes **even with a valid token** — defense in depth for `--host 0.0.0.0` deployments.
 - One active connection at a time; a new authenticated socket replaces the previous one.
+- Zero-config loopback skips the token only for origins in `trustedExtensionOrigins` (default: the shipped extension's key-derived id). The manifest `key` is public, so this pins *incidental* access — an extension that deliberately copies the key inherits the id; set `trustedExtensionOrigins: []` and pair the token when hostile extensions are in scope. Origin checks bind browser contexts only — any local process can spoof an `Origin` header (and read the token file), so the bearer token remains the actual boundary. The exemption is loopback-only, but a reverse proxy terminating on 127.0.0.1 (`tailscale serve`, `ssh -L`, nginx) makes proxied clients appear as loopback — use hardened mode for such topologies.
 - The bridge is a confused-deputy boundary, not a general auth layer: never expose `dsh web --host 0.0.0.0` on untrusted networks.
 - Extracted page text is marked as untrusted model input. Page reads honor the extension's ask/auto/off policy, while state-changing tools require an origin-scoped side-panel decision and fail closed without a panel. Same-origin repetition can be trusted for the current panel session; permanent trust remains an explicit setting.
 

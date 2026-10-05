@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { apply, assertPositiveInteger, Config, resolveConfig } from '../src/index.ts'
+import { DEFAULT_TRUSTED_EXTENSION_ORIGINS } from '../src/extension-origins.ts'
 
 /** Minimal context stub: apply only needs the services at registration time. */
 function stubContext(): Context {
@@ -58,8 +59,10 @@ describe('config', () => {
       ...VALID,
       sessionWorkspacePath: dshHomePath('browser-sessions'),
       deferSessionCreate: true,
+      trustedExtensionOrigins: [...DEFAULT_TRUSTED_EXTENSION_ORIGINS],
     })
     expect(new Config().sessionWorkspacePath).toBe(dshHomePath('browser-sessions'))
+    expect(new Config().trustedExtensionOrigins).toEqual([...DEFAULT_TRUSTED_EXTENSION_ORIGINS])
   })
 
   it('preserves explicit values and the empty-string workspace opt-out', () => {
@@ -70,6 +73,7 @@ describe('config', () => {
       maxInteractiveItems: 3,
       sessionWorkspacePath: '',
       deferSessionCreate: false,
+      trustedExtensionOrigins: ['chrome-extension://abcdefghijklmnopabcdefghijklmnop'],
     })).toEqual({
       token: 'fixed',
       toolTimeoutMs: 1,
@@ -77,8 +81,22 @@ describe('config', () => {
       maxInteractiveItems: 3,
       sessionWorkspacePath: '',
       deferSessionCreate: false,
+      trustedExtensionOrigins: ['chrome-extension://abcdefghijklmnopabcdefghijklmnop'],
     })
     expect(new Config({ sessionWorkspacePath: '' }).sessionWorkspacePath).toBe('')
+  })
+
+  it('rejects trustedExtensionOrigins entries that are not extension origins', () => {
+    // A web origin here would grant that site's pages tokenless loopback
+    // access — the exact trust Finding 1 removed. Malformed entries fail
+    // loudly instead of silently disabling zero-config.
+    for (const bad of ['https://intranet.example', 'chrome-extension://short', 'chrome-extension://abc/', '']) {
+      expect(() => resolveConfig({ trustedExtensionOrigins: [bad] }), bad).toThrow(/trustedExtensionOrigins/)
+    }
+  })
+
+  it('accepts an explicit empty allowlist (hardened fail-closed mode)', () => {
+    expect(resolveConfig({ trustedExtensionOrigins: [] })).toMatchObject({ trustedExtensionOrigins: [] })
   })
 })
 

@@ -99,7 +99,7 @@ Windows 请运行：
 $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 ```
 
-安装器会下载 `main`、构建并注册桥插件、把 Chrome 扩展构建到 `~/.dsh/browser-extension`，然后打开 `chrome://extensions`。首次安装时，请把该目录作为已解压扩展加载；更新时点击**重新加载**。如果 dsh 已在运行，请重启。
+安装器会下载 `main`、构建并注册桥插件、把 Chrome 扩展构建到 `~/.dsh/browser-extension`，然后打开 `chrome://extensions`。首次安装时，请把该目录作为已解压扩展加载；更新时点击**重新加载**。如果 dsh 已在运行，请重启。从 0.1.5 之前的版本更新请注意：扩展固定了 manifest `key`，其 id（及按 id 存储的设置）会变更一次——如曾配置远程桥地址与 token，请在面板中重新填写。
 
 `scripts/install.sh` 覆盖 macOS 与 Linux，`scripts/install.ps1` 覆盖 Windows；两者写入同一个托管工作区和同一份安装元数据。当系统提供剪贴板工具（`pbcopy`、`wl-copy`、`xclip`、`xsel` 或 PowerShell 的 `Set-Clipboard`）时，安装器会把扩展路径复制到剪贴板；无论是否复制成功都会打印该路径。若未检测到 Chrome/Chromium，安装器会打印对应的安装命令；设置 `DSH_INSTALL_BROWSER=1` 可让安装器尝试自动安装。
 
@@ -183,7 +183,8 @@ pnpm --filter dsh-browser-extension run test
 ## 安全
 
 - 桥路径在 `/api` 信任栅栏之外，自带 bearer token 认证。
-- Chrome 扩展的本地 Origin 保留零配置回环访问；Firefox Origin 是每次安装生成的 UUID，必须携带 bearer token。
+- 零配置回环访问只授予本扩展的固定 id（由公开的 manifest `key` 派生）；未列入的扩展必须携带 bearer token。该 key 是公开的，因此这只防*误连*其它扩展——刻意复制 key 的扩展会得到相同 id。需要抵御恶意扩展的部署应设置 `trustedExtensionOrigins: []` 并强制 token 配对。Firefox Origin 是每次安装生成的 UUID，始终需要携带 token。
+- 该豁免仅限回环。在 127.0.0.1 上终结连接的反向代理（`tailscale serve`、`ssh -L`、nginx）会让代理客户端表现为回环——此类部署请使用上述加固模式。
 - 特权网关方法（`settings.*`/`credentials.*`/`host.open*`）对非回环来源一律拒绝。
 - 单活动连接；浏览器页面管线为纯文本且不截图；用户主动添加的对话图片交给 dsh 持久附件服务，密码和卡号值永不回传。
 - 助手开始工作时会绑定当时的活动标签页（提交提示时绑定；直接调用浏览器工具时则在首次调用绑定）。用户手动切页后，后续浏览器操作会暂停，侧栏会询问让助手继续原页面还是跟随新页面；选择原页面后允许在后台继续，但扩展绝不静默改绑或切换用户正在看的页面。受控标签页关闭后也会暂停，直到用户显式选择当前页。

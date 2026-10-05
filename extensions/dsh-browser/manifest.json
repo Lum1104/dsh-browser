@@ -3,8 +3,9 @@
   "name": "__MSG_extensionName__",
   "description": "__MSG_extensionDescription__",
   "default_locale": "en",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "minimum_chrome_version": "116",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqzAPQcLNodZ9dwaOafZpmUMtFRDi7nO93D3pft0ptPa+N3/bNzFptRJvZOP+39F+4hWS92GY1pYOjfqgtydcRtlkBuoVylPl0bgqKcIB1Cdyug7G5HJmRzXSpuhl1/mgbJfKE68Glenc3eDFLESQDEwE1wPDaLaCjvP+d3HVVJZcQtIRzUzKpvt21ACG8A7lmw6j3felQaw9AJTWRUehklV0gwcM09HLYCs0Pgr07HCgyzWuMZxpdkiEARCJ7D6iY//vk40/wX5X3OtgMypJpXtqsGAtUsS+j6S22EGvR5Cm3gy9GZyxYdqCLfjsZ1BjRsBSDTAEgmU3DXQ58brhVQIDAQAB",
   "permissions": [
     "sidePanel",
     "storage",

@@ -2,9 +2,15 @@
  * Browser smoke: the built MV3 extension connects through a real WebSocket to
  * the migrated bridge carrier. dsh 0.1.2 Remote semantics are covered by
  * remote-host-api.spec; this test deliberately owns no pre-0.1.2 Host shim.
+ *
+ * The zero-config case is the load-bearing one for the origin allowlist: the
+ * built extension carries the stable manifest `key`, so the id Chromium
+ * derives MUST be the pinned default and the tokenless loopback hello MUST be
+ * accepted purely on that origin. The second case exercises the paired-token
+ * path (Firefox-style) against the same server.
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -13,6 +19,7 @@ import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { chromium, type BrowserContext } from 'playwright-core'
 import { BridgeServer } from '../../src/server.ts'
+import { DEFAULT_TRUSTED_EXTENSION_ORIGINS, STABLE_CHROME_EXTENSION_ID } from '../../src/extension-origins.ts'
 import type { BrowserHostApi, HostRpcCall, HostRpcResult } from '../../src/host-api.ts'
 
 const TOKEN = 'e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0'
@@ -23,7 +30,12 @@ function chromiumExecutable(): string | undefined {
   if (fromEnv !== undefined && existsSync(fromEnv)) return fromEnv
   const cacheRoot = join(process.env.HOME ?? '', 'Library', 'Caches', 'ms-playwright')
   if (!existsSync(cacheRoot)) return undefined
-  for (const dir of ['chromium-1217', 'chromium-1226', 'chromium-1181']) {
+  // Any installed playwright chromium build, newest first — the exact build
+  // number changes with every playwright-core bump.
+  const dirs = readdirSync(cacheRoot)
+    .filter(dir => /^chromium-\d+$/.test(dir))
+    .sort((a, b) => Number(b.slice('chromium-'.length)) - Number(a.slice('chromium-'.length)))
+  for (const dir of dirs) {
     for (const candidate of [
       join(cacheRoot, dir, 'chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
       join(cacheRoot, dir, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
@@ -72,6 +84,10 @@ beforeAll(async () => {
   }
   bridge = new BridgeServer({
     token: TOKEN,
+    // The real allowlist default: only the shipped extension's stable id is
+    // token-exempt on loopback. The tests below prove the id derivation and
+    // the tokenless hello against this exact list.
+    trustedExtensionOrigins: DEFAULT_TRUSTED_EXTENSION_ORIGINS,
     api,
     toolTimeoutMs: 10_000,
     caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
@@ -96,6 +112,9 @@ beforeAll(async () => {
     executablePath: executable,
     channel: 'chromium',
     headless: true,
+    // The panel renders zh or en copy from navigator.languages; the
+    // selectors below are zh, so pin the locale regardless of host Chrome.
+    locale: 'zh-CN',
     args: [
       `--disable-extensions-except=${EXTENSION_DIR}`,
       `--load-extension=${EXTENSION_DIR}`,
@@ -113,18 +132,41 @@ afterAll(async () => {
 })
 
 describe('extension ↔ migrated bridge smoke', () => {
-  it('connects, negotiates caps, and initializes a Session through the private bridge protocol', { timeout: 60_000 }, async () => {
-    if (executable === undefined) {
-      console.warn('SKIP: no usable Chromium')
-      return
-    }
-    if (browser === undefined || port === undefined) {
-      console.warn('SKIP: extension dist not built')
-      return
-    }
+  it('loads the shipped build under the pinned extension id and connects tokenless via the origin allowlist', { timeout: 60_000 }, async (ctx) => {
+    if (executable === undefined) return ctx.skip()
+    if (browser === undefined || port === undefined) return ctx.skip()
 
     let worker = browser.serviceWorkers()[0]
     worker ??= await browser.waitForEvent('serviceworker', { timeout: 30_000 })
+    const extensionId = new URL(worker.url()).host
+    // The manifest `key` must hash to exactly the pinned default origin —
+    // this is what makes the tokenless hello below meaningful.
+    expect(extensionId).toBe(STABLE_CHROME_EXTENSION_ID)
+
+    const panel = await browser.newPage()
+    await panel.goto(`chrome-extension://${extensionId}/panel/index.html`)
+    await panel.waitForSelector('header.topbar', { timeout: 15_000 })
+
+    // Address only, token LEFT EMPTY: the hello must be accepted purely on
+    // the pinned chrome-extension:// origin over loopback.
+    await panel.click('button[aria-label="打开设置"]')
+    await panel.fill('input[placeholder*="自动检测"]', `ws://127.0.0.1:${String(port)}`)
+    await panel.fill('input[type="password"]', '')
+    await panel.click('text=保存并连接')
+
+    await expect.poll(
+      () => panel.locator('.connection').textContent(),
+      { timeout: 30_000 },
+    ).toContain('已连接')
+    await panel.close()
+  })
+
+  it('connects with an explicitly paired token and initializes a Session through the private bridge protocol', { timeout: 60_000 }, async (ctx) => {
+    if (executable === undefined) return ctx.skip()
+    if (browser === undefined || port === undefined) return ctx.skip()
+
+    const worker = browser.serviceWorkers()[0]
+    if (worker === undefined) return ctx.skip()
     const extensionId = new URL(worker.url()).host
     const panel = await browser.newPage()
     await panel.goto(`chrome-extension://${extensionId}/panel/index.html`)

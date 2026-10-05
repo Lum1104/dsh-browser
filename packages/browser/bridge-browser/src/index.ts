@@ -39,6 +39,7 @@ import { withSessionDeferral } from './session-deferral.ts'
 import { withSessionWorkspace } from './session-workspace.ts'
 import { purgeSessionFiles, type SessionPurgeDeps } from './session-purge.ts'
 import { resolveToken } from './token.ts'
+import { DEFAULT_TRUSTED_EXTENSION_ORIGINS } from './extension-origins.ts'
 import {
   createRemoteHostApi,
   type HostConnectionLike,
@@ -71,6 +72,16 @@ const DEFAULT_DEFER_SESSION_CREATE = true
 export interface Config {
   /** Fixed bearer token. When absent, a token is generated on first boot and persisted under the dsh home (0600). */
   token?: string
+  /**
+   * Exact `chrome-extension://<id>` origins that may skip the bearer token on
+   * loopback. Defaults to the shipped extension's stable id (manifest `key`).
+   * Every other origin — unlisted extensions and all non-loopback clients —
+   * must present the token. `[]` disables the exemption entirely (hardened
+   * mode: pair the token). Entries must be exact `chrome-extension://`
+   * origins; a web origin here would re-grant the trust this list exists to
+   * remove, so anything else fails loudly at startup.
+   */
+  trustedExtensionOrigins?: string[]
   /** Per-tool-call timeout in ms. Defaults to 90000. */
   toolTimeoutMs?: number
   /** Upper bound on one snapshot's rendered characters. Defaults to 32000; minimum 500. */
@@ -85,6 +96,7 @@ export interface Config {
 
 export const Config: z<Config> = z.object({
   token: z.string(),
+  trustedExtensionOrigins: z.array(z.string()).default([...DEFAULT_TRUSTED_EXTENSION_ORIGINS]),
   toolTimeoutMs: z.number().step(1).min(1).default(DEFAULT_TOOL_TIMEOUT_MS),
   snapshotMaxChars: z.number().step(1).min(MIN_SNAPSHOT_MAX_CHARS).default(DEFAULT_SNAPSHOT_MAX_CHARS),
   maxInteractiveItems: z.number().step(1).min(1).default(DEFAULT_MAX_INTERACTIVE_ITEMS),
@@ -102,6 +114,9 @@ export function assertPositiveInteger(name: string, value: number): void {
   }
 }
 
+/** Origin shape the loopback exemption accepts: exactly `chrome-extension://<32-char a-p id>`. */
+const EXTENSION_ORIGIN_PATTERN = /^chrome-extension:\/\/[a-p]{32}$/
+
 /**
  * Apply defaults and direct-call validation at the plugin boundary.
  * @param config - Loader-resolved or directly supplied plugin configuration.
@@ -115,6 +130,7 @@ export function resolveConfig(config: Config): ResolvedConfig {
     maxInteractiveItems: config.maxInteractiveItems ?? DEFAULT_MAX_INTERACTIVE_ITEMS,
     sessionWorkspacePath: config.sessionWorkspacePath ?? DEFAULT_SESSION_WORKSPACE_PATH,
     deferSessionCreate: config.deferSessionCreate ?? DEFAULT_DEFER_SESSION_CREATE,
+    trustedExtensionOrigins: config.trustedExtensionOrigins ?? [...DEFAULT_TRUSTED_EXTENSION_ORIGINS],
   }
   assertPositiveInteger('toolTimeoutMs', resolved.toolTimeoutMs)
   assertPositiveInteger('snapshotMaxChars', resolved.snapshotMaxChars)
@@ -122,6 +138,13 @@ export function resolveConfig(config: Config): ResolvedConfig {
     throw new Error(`bridge-browser: snapshotMaxChars must be at least ${MIN_SNAPSHOT_MAX_CHARS}`)
   }
   assertPositiveInteger('maxInteractiveItems', resolved.maxInteractiveItems)
+  for (const origin of resolved.trustedExtensionOrigins) {
+    if (!EXTENSION_ORIGIN_PATTERN.test(origin)) {
+      throw new Error(
+        `bridge-browser: trustedExtensionOrigins entries must be exact chrome-extension://<id> origins (32 chars a-p); received "${origin}"`,
+      )
+    }
+  }
   return resolved
 }
 
@@ -216,6 +239,7 @@ function mountBridge(
 
   const server = new BridgeServer({
     token: tokenRes.token,
+    trustedExtensionOrigins: resolved.trustedExtensionOrigins,
     api,
     toolTimeoutMs: resolved.toolTimeoutMs,
     caps: {
@@ -237,8 +261,9 @@ function mountBridge(
 
   // Zero-config discovery endpoint: the extension fetches this to learn the
   // bridge WebSocket URL without any manual configuration. The URL carries no
-  // secret (loopback connections skip the token); non-loopback deployments
-  // keep requiring the token on the WS itself.
+  // secret; loopback connections still authenticate either by the pinned
+  // extension origin (trustedExtensionOrigins) or the bearer token, and
+  // non-loopback deployments keep requiring the token on the WS itself.
   const configRoute: WebRoute = {
     kind: 'exact',
     path: BRIDGE_CONFIG_PATH,
@@ -275,6 +300,11 @@ function mountBridge(
     tokenRes.generated
       ? `browser bridge: new token generated and persisted at ${tokenRes.file} (chmod 0600); connect the extension and paste it in its settings`
       : `browser bridge: using token from ${tokenRes.file}`,
+  )
+  ctx.logger.info(
+    resolved.trustedExtensionOrigins.length === 0
+      ? 'browser bridge: no extension origin is token-exempt (hardened mode); every client must present the token'
+      : `browser bridge: token-exempt loopback origins: ${resolved.trustedExtensionOrigins.join(', ')}`,
   )
   ctx.logger.info(`browser bridge: listening on ${BRIDGE_PATH}`)
 }
