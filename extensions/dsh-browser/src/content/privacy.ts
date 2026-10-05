@@ -22,6 +22,22 @@ const SENSITIVE_PATTERNS = [
 ]
 
 /**
+ * Whether an `autocomplete` attribute marks the field as payment-related.
+ *
+ * The HTML attribute is a case-insensitive space-separated token list, so
+ * real checkout markup like `section-checkout billing cc-number` must be
+ * tokenized before matching — a whole-string `startsWith('cc-')` check
+ * silently misses every multi-token value.
+ *
+ * @param autocomplete - raw `autocomplete` attribute value.
+ * @returns true when any token is `credit-card` or a `cc-*` detail token.
+ */
+function hasPaymentAutocompleteToken(autocomplete: string): boolean {
+  const tokens = autocomplete.trim().toLowerCase().split(/\s+/)
+  return tokens.includes('credit-card') || tokens.some((token) => token.startsWith('cc-'))
+}
+
+/**
  * Whether a form field must never be echoed back to the model.
  * @param el - the form element (input/select/textarea).
  * @returns true for password inputs, credit-card autocomplete fields, and
@@ -30,8 +46,11 @@ const SENSITIVE_PATTERNS = [
 export function isSensitiveField(el: Element): boolean {
   if (el instanceof HTMLInputElement) {
     if (el.type === 'password') return true
-    const autocomplete = String(el.autocomplete)
-    if (autocomplete === 'credit-card' || autocomplete.startsWith('cc-')) return true
+    // Read the CONTENT attribute, not the IDL property: Chrome's
+    // `autocomplete` getter is limited to known values and returns '' for
+    // token lists it cannot parse ('cc-number foo', 'bogus cc-number'), so
+    // the IDL would silently drop markup the mask must see.
+    if (hasPaymentAutocompleteToken(el.getAttribute('autocomplete') ?? '')) return true
   }
   const name = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement
     ? el.name
