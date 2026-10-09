@@ -10,6 +10,7 @@
  *   panel → bg: { type: 'rpc', id, method, payload }
  *   panel → bg: { type: 'respond', id, rpcId, result }
  *   panel → bg: { type: 'settings', id, settings: Partial<Settings> }
+ *   panel → bg: { type: 'devtools.detach', id }
  *   panel → bg: { type: 'session.active', sessionId }
  *   panel → bg: { type: 'approval.response', id, decision }
  *   panel → bg: { type: 'tab-affinity.response', revision, decision, sessionId }
@@ -20,6 +21,8 @@
  *   bg → panel: { type: 'rpc.result', id, ok, result? | error? }
  *   bg → panel: { type: 'respond.result', id, ok, result? | error? }
  *   bg → panel: { type: 'settings.result', id, ok, error? }
+ *   bg → panel: { type: 'devtools.status', supported, enabled, attached, tabId?, error? }
+ *   bg → panel: { type: 'devtools.detach.result', id, ok, error? }
  *   bg → panel: { type: 'status', state: BridgeState, caps? }
  *   bg → panel: { type: 'event', frame: ServerFrame }
  *   bg → panel: { type: 'approval.request', request }
@@ -39,9 +42,10 @@ import {
   type RespondResult,
 } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import { BRIDGE_CONFIG_PATH, BRIDGE_PATH } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { BRIDGE_CONFIG_PATH, BRIDGE_PATH, DEVTOOLS_CAPS_VERSION } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { BridgeClient, type BridgeState } from './bridge.ts'
 import { createRpc } from './rpc.ts'
+import { listTabFrames } from './frames.ts'
 import {
   dispatchOpenTab,
   dispatchToolCall,
@@ -75,6 +79,9 @@ import { FocusedWindowTracker } from './focused-window.ts'
 import { SelectionTracker, type SelectionSource } from './selection.ts'
 import { parsePageSelection, parseSelectionCapture } from '../selection.ts'
 import { ApprovalCoordinator, type ApprovalRequestResult } from './approval-coordinator.ts'
+import { devToolsSupported } from './debugger-session.ts'
+import { createDevToolsController } from './devtools-controller.ts'
+import { devToolsApprovalForCall, isDevToolsTool, resolveApprovalGate } from './authorization.ts'
 import {
   LEGACY_RECENT_SESSION_STORAGE_KEY,
   PAGE_SESSION_CONTEXT_STORAGE_KEY,
@@ -88,6 +95,12 @@ export interface Settings {
   sharePageContent: 'ask' | 'auto' | 'off'
   /** Allow every browser operation without an approval prompt. */
   unrestrictedBrowserAccess: boolean
+  /**
+   * High-privilege developer tools (element/CSS debugging, page JavaScript,
+   * network capture). Off by default: while it is off every devtools call
+   * raises its own approval prompt, and the origin allowlist never covers it.
+   */
+  allowDevTools: boolean
   /** Origins whose state-changing actions may run without another prompt. */
   trustedActionOrigins: string[]
   /** Show an OS notification when no side panel can display an approval. */
@@ -102,6 +115,7 @@ const SETTINGS_DEFAULTS: Settings = {
   token: '',
   sharePageContent: 'auto',
   unrestrictedBrowserAccess: false,
+  allowDevTools: false,
   trustedActionOrigins: [],
   approvalNotifications: true,
   autoResumeSession: true,
@@ -178,6 +192,30 @@ const transientEvents = new TransientEventCache()
 const tabAffinity = new TabAffinityController()
 const focusedWindow = new FocusedWindowTracker()
 const selections = new SelectionTracker()
+
+/** Whether this browser build can serve the developer-tools group at all. */
+const devToolsCapability = devToolsSupported()
+
+/**
+ * High-privilege developer tools. The controller refuses every call unless the
+ * user's setting is on, and the background still routes each call through the
+ * approval gate first.
+ */
+const devTools = createDevToolsController({
+  // Consent is enforced by the approval gate in `dispatchDevToolsTool`: with the
+  // setting off every call raises its own dialog, and unrelated switches never
+  // cover this group. The controller only owns capability and target policy.
+  resolveTarget: async (sessionId) => {
+    const target = await resolveToolTab(sessionId)
+    if ('ok' in target || target.id === undefined) return undefined
+    return {
+      tabId: target.id,
+      ...(target.url === undefined ? {} : { url: target.url }),
+      ...(target.title === undefined ? {} : { title: target.title }),
+    }
+  },
+  onStateChange: () => { broadcastDevToolsState() },
+})
 const pageSessionContexts = new PageSessionContextTracker({
   read: async () => (await chrome.storage.session.get(PAGE_SESSION_CONTEXT_STORAGE_KEY))[PAGE_SESSION_CONTEXT_STORAGE_KEY],
   write: async (value) => {
@@ -187,9 +225,17 @@ const pageSessionContexts = new PageSessionContextTracker({
 void chrome.storage.session.remove(LEGACY_RECENT_SESSION_STORAGE_KEY).catch(() => {})
 /** Ephemeral allowlist: cleared when the last side panel closes or this worker restarts. */
 const sessionTrustedActionOrigins = new Set<string>()
+/**
+ * Ephemeral developer-tools grant for this panel lease. Set when the user
+ * chooses "trust this session" on a devtools prompt; never persisted, and
+ * never implied by the origin allowlist or unrestricted access.
+ */
+let sessionDevToolsGrant = false
 /** Tool calls that are either withdrawable or completing an already-dispatched action. */
 interface ActiveToolCall {
   controller: AbortController
+  /** Tool name, so a revocation can target the developer-tools group only. */
+  name: string
   unrestrictedAccess: boolean
   committed: boolean
   revocationRequested: boolean
@@ -266,8 +312,11 @@ async function persistSettings(next: Partial<Settings>): Promise<void> {
   const accessRevision = changesUnrestrictedAccess ? ++unrestrictedAccessRevision : unrestrictedAccessRevision
   const updated = normalizeSettings({ ...settings, ...next })
   const revokesUnrestrictedAccess = settings.unrestrictedBrowserAccess && !updated.unrestrictedBrowserAccess
+  const changesDevTools = typeof next.allowDevTools === 'boolean'
+  const revokesDevTools = changesDevTools && (settings.allowDevTools || sessionDevToolsGrant) && !updated.allowDevTools
   settings = updated
   if (!updated.unrestrictedBrowserAccess) unrestrictedAccessActive = false
+  if (revokesDevTools) sessionDevToolsGrant = false
   syncSelectionWatch()
   let accessTransition: Promise<void> | undefined
   if (revokesUnrestrictedAccess) {
@@ -297,6 +346,21 @@ async function persistSettings(next: Partial<Settings>): Promise<void> {
     unrestrictedAccessActive = true
     syncSelectionWatch()
   }
+  if (changesDevTools) {
+    // Turning the allowance off is a revocation: detach the debugger and abort
+    // every in-flight devtools call so the capability cannot outlive the choice.
+    if (revokesDevTools) {
+      cancelDevToolsCalls()
+      await devTools.revoke()
+    } else if (updated.allowDevTools) {
+      devTools.resume()
+      await prewarmDevTools()
+    } else {
+      // Still off: nothing to prewarm, and no consent was granted.
+      devTools.resume()
+    }
+    broadcastDevToolsState()
+  }
 }
 
 function normalizeSettings(candidate: Settings): Settings {
@@ -310,6 +374,9 @@ function normalizeSettings(candidate: Settings): Settings {
     ...candidate,
     sharePageContent,
     unrestrictedBrowserAccess: candidate.unrestrictedBrowserAccess === true,
+    // A browser without a debugger API can never use the developer tools, so
+    // the persisted choice is kept but the runtime path stays disabled.
+    allowDevTools: candidate.allowDevTools === true && devToolsCapability,
     trustedActionOrigins: trusted,
     approvalNotifications: candidate.approvalNotifications !== false,
     autoResumeSession: candidate.autoResumeSession !== false,
@@ -337,6 +404,26 @@ function broadcastStatus(): void {
   for (const port of panelPorts) {
     try { port.postMessage(payload) } catch { /* port already closed */ }
   }
+}
+
+/** Broadcast developer-tools support, attachment state, and the user's choice. */
+function broadcastDevToolsState(): void {
+  for (const port of panelPorts) postDevToolsState(port)
+}
+
+/** Report developer-tools state to one panel port. */
+function postDevToolsState(port: chrome.runtime.Port): void {
+  const state = devTools.state()
+  try {
+    port.postMessage({
+      type: 'devtools.status',
+      supported: state.supported,
+      enabled: settingsLoaded && settings.allowDevTools,
+      attached: state.attached,
+      ...(state.tabId === undefined ? {} : { tabId: state.tabId }),
+      ...(state.error === undefined ? {} : { error: state.error }),
+    })
+  } catch { /* port already closed */ }
 }
 
 function broadcastTabAffinity(): void {
@@ -403,6 +490,15 @@ function selectionSharingEnabled(): boolean {
 /** Whether unrestricted access is enabled and no earlier grant is still being revoked. */
 function unrestrictedAccessEnabled(): boolean {
   return unrestrictedAccessActive && unrestrictedRevocation === undefined
+}
+
+/**
+ * Whether the user has opted into developer tools without a per-call prompt.
+ * The ephemeral session grant is applied by the approval gate instead, so this
+ * reports only the persisted setting.
+ */
+function devToolsAllowed(): boolean {
+  return settingsLoaded && settings.allowDevTools
 }
 
 /** Page selections are captured only in a window with an open panel. */
@@ -884,18 +980,31 @@ async function authorizeToolCall(
   unrestrictedAccess: boolean = unrestrictedAccessEnabled(),
 ): Promise<ApprovalAuthorization> {
   if (signal.aborted) return 'cancelled'
-  if (unrestrictedAccess) return 'approved'
-  if (actionCoveredByTrustedOrigins(
+  const gate = resolveApprovalGate({
     prompt,
-    sessionTrustedActionOrigins,
-    settings.trustedActionOrigins,
-  )) {
-    return 'approved'
-  }
+    devToolsAllowed: devToolsAllowed(),
+    devToolsSessionGrant: sessionDevToolsGrant,
+    unrestrictedAccess,
+    coveredByTrustedOrigins: actionCoveredByTrustedOrigins(
+      prompt,
+      sessionTrustedActionOrigins,
+      settings.trustedActionOrigins,
+    ),
+  })
+  if (gate !== 'prompt') return gate
   const result: ApprovalRequestResult = await approvals.request(prompt, signal, windowId, sessionId)
   if (signal.aborted) return 'cancelled'
   if (result.status !== 'decision') return result.status
   const { decision } = result
+  if (prompt.devTools === true) {
+    // "Trust this session" and the dedicated decision both arm the ephemeral
+    // devtools grant until the panel lease, the worker, or the setting ends it.
+    if (decision === 'trust-session' || decision === 'trust-dev-tools') {
+      sessionDevToolsGrant = true
+      return 'approved'
+    }
+    return decision === 'allow-once' ? 'approved' : 'denied'
+  }
   if (decision === 'always-allow-reads' && prompt.kind === 'read') {
     await persistSettings({ sharePageContent: 'auto' })
     return 'approved'
@@ -1063,6 +1172,7 @@ function routeToolCall(call: ToolCall): void {
   let settle!: () => void
   const activeCall: ActiveToolCall = {
     controller,
+    name: call.name,
     unrestrictedAccess,
     committed: false,
     revocationRequested: false,
@@ -1116,6 +1226,8 @@ function routeToolCall(call: ToolCall): void {
   }
   void (isTabManagementTool(call.name)
     ? managementDispatch()
+    : isDevToolsTool(call.name)
+    ? dispatchDevToolsTool(call, controller.signal)
     : call.name === 'browser_open_tab'
     ? resolveOpenTabWindow(call.sessionId).then((target) => 'ok' in target
       ? target
@@ -1203,6 +1315,78 @@ function cancelToolCall(id: string): void {
   if (call !== undefined && !call.committed) call.controller.abort()
 }
 
+/**
+ * Run one developer-tools call: approve it, then hand it to the debugger
+ * controller. Devtools calls take a dedicated path because they never touch the
+ * content script and must not be satisfied by the page-sharing relaxations.
+ */
+async function dispatchDevToolsTool(call: ToolCall, signal: AbortSignal): Promise<ToolAnswer> {
+  if (signal.aborted) return devToolsCancelled()
+  const target = await resolveToolTab(call.sessionId)
+  if ('ok' in target) return target
+  if (signal.aborted) return devToolsCancelled()
+  const frames = await listTabFrames(target.id!, target.url)
+  const prompt = devToolsApprovalForCall(call, frames)
+  const authorization = await authorizeToolCall(prompt, signal, target.windowId ?? 0, call.sessionId)
+  if (signal.aborted) return devToolsCancelled()
+  if (authorization !== 'approved') {
+    return {
+      ok: false,
+      error: { code: authorization === 'timed-out' ? 'timeout' : 'action-failed', message: approvalFailureMessage(prompt, authorization) },
+    }
+  }
+  try {
+    return { ok: true, result: await devTools.handle(call.name, call.args, call.sessionId) }
+  } catch (error: unknown) {
+    return {
+      ok: false,
+      error: {
+        code: signal.aborted ? 'bridge-closed' : 'action-failed',
+        message: error instanceof Error ? error.message : String(error),
+      },
+    }
+  }
+}
+
+function devToolsCancelled(): ToolAnswer {
+  return { ok: false, error: { code: 'bridge-closed', message: 'The browser tool call was cancelled.' } }
+}
+
+/** Abort every in-flight developer-tools call (setting revoked). */
+function cancelDevToolsCalls(): void {
+  for (const call of activeToolCalls.values()) {
+    if (isDevToolsTool(call.name) && !call.committed) call.controller.abort()
+  }
+}
+
+/**
+ * Attach the debugger to the controlled tab as soon as the user enables the
+ * allowance, so network capture sees traffic from the start instead of only
+ * after the first devtools call.
+ */
+async function prewarmDevTools(): Promise<void> {
+  await affinityReady
+  const target = await resolveToolTab()
+  if ('ok' in target || target.id === undefined) return
+  await devTools.prewarm(target.id).catch(() => {
+    // Attach is lazy by design: a tab that cannot be debugged right now only
+    // surfaces an error when a devtools call actually needs it.
+  })
+}
+
+function approvalFailureMessage(prompt: ApprovalPrompt, authorization: Exclude<ApprovalAuthorization, 'approved'>): string {
+  switch (authorization) {
+    case 'denied':
+      return `The user denied the browser approval request for "${prompt.action}".`
+    case 'unavailable':
+      return `No browser side panel was available to receive or complete the approval request for "${prompt.action}".`
+    case 'timed-out':
+      return `The browser approval request for "${prompt.action}" timed out before the user responded.`
+    case 'cancelled':
+      return `The browser approval request for "${prompt.action}" was cancelled.`
+  }
+}
+
 async function revokeUnrestrictedAccess(): Promise<void> {
   const calls = [...unsettledToolCalls].filter((call) => call.unrestrictedAccess)
   const refreshes = [...activeFollowRefreshes.values()].filter((refresh) => refresh.unrestrictedAccess)
@@ -1278,7 +1462,12 @@ async function startBridge(): Promise<void> {
         broadcastStatus()
         void pushBudgetToControlledTab(negotiated)
       },
-    }, probeBridge, () => panelPorts.size > 0)
+    }, probeBridge, () => panelPorts.size > 0, {
+      // Advertised as soon as the platform can serve it, so the host registers
+      // the developer-tools group; the user's setting and per-call approval
+      // still gate every one of those calls.
+      ...devToolsCapability ? { devTools: { version: DEVTOOLS_CAPS_VERSION } } : {},
+    })
     bridge = client
     rpc = createRpc(client)
   }
@@ -1334,6 +1523,7 @@ chrome.runtime.onConnect.addListener((port) => {
     if (bridge === null || bridge.state === 'stopped') return startBridge()
   })
   try { port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps }) } catch { /* port closed */ }
+  broadcastDevToolsState()
   void affinityReady.then(async () => {
     await syncActiveTab()
     try { port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshot() }) } catch { /* port closed */ }
@@ -1446,6 +1636,31 @@ chrome.runtime.onConnect.addListener((port) => {
           port.postMessage({ type: 'selection', selection: selections.current(registration.windowId) })
         } catch { /* port closed */ }
         void postResumeHint(port, registration.windowId)
+        break
+      }
+      case 'devtools.detach': {
+        // The user asked for an immediate detach from the settings page; keep
+        // the persisted allowance but drop the current attachment.
+        const request = message as { id?: unknown }
+        void devTools.detachAll().then(
+          () => {
+            broadcastDevToolsState()
+            if (typeof request.id === 'string') {
+              try { port.postMessage({ type: 'devtools.detach.result', id: request.id, ok: true }) } catch { /* port closed */ }
+            }
+          },
+          (error: unknown) => {
+            if (typeof request.id !== 'string') return
+            try {
+              port.postMessage({
+                type: 'devtools.detach.result',
+                id: request.id,
+                ok: false,
+                error: { message: error instanceof Error ? error.message : String(error) },
+              })
+            } catch { /* port closed */ }
+          },
+        )
         break
       }
       case 'selection.clear': {
@@ -1563,6 +1778,9 @@ chrome.runtime.onConnect.addListener((port) => {
       case 'request-status':
         try {
           port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps })
+          // A push on connect cannot reach a panel that has not subscribed yet,
+          // so the status request is also the pull path for developer tools.
+          postDevToolsState(port)
           port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshot() })
           const statusWindowId = panelWindows.get(port)
           if (statusWindowId !== undefined) {
@@ -1692,6 +1910,12 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // quote taken from its parent page, and vice versa.
 chrome.webNavigation.onCommitted.addListener(({ tabId, frameId }) => {
   broadcastSelections(selections.clearTab(tabId, frameId))
+})
+
+// A closed tab cannot stay debugged; release the attachment immediately so the
+// "being debugged" banner never outlives its page.
+chrome.tabs.onRemoved.addListener((tabId) => {
+  devTools.releaseTab(tabId)
 })
 
 // Ports are cleaned up by their own disconnect; only the window's quote is

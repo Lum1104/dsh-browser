@@ -15,8 +15,11 @@ export interface PanelCopy {
     allowOnce: string
     alwaysAllowReads: string
     trustSession: string
+    devToolsTitle: string
+    trustDevTools: string
     readFootnote: string
     actionFootnote: string
+    devToolsFootnote: string
   }
   tool: {
     running: string
@@ -74,6 +77,14 @@ export interface PanelCopy {
     sharingOff: string
     unrestrictedBrowserAccess: string
     unrestrictedBrowserAccessHelp: string
+    allowDevTools: string
+    allowDevToolsHelp: string
+    devToolsUnsupported: string
+    devToolsOff: string
+    devToolsIdle: string
+    devToolsAttached: string
+    devToolsError: string
+    devToolsDetach: string
     approvalNotifications: string
     approvalNotificationsHelp: string
     autoResumeSession: string
@@ -232,8 +243,11 @@ const EN: PanelCopy = {
     allowOnce: 'Allow once',
     alwaysAllowReads: 'Always allow reads',
     trustSession: 'Trust this domain for this session',
+    devToolsTitle: 'Allow developer tools?',
+    trustDevTools: 'Trust developer tools for this session',
     readFootnote: 'Esc to deny · You can disable automatic reading in Settings at any time',
     actionFootnote: 'Esc to deny · Temporary trust ends when the side panel closes · Typed content is never shown',
+    devToolsFootnote: 'Developer tools expose page internals and captured traffic. Trust here lasts until the side panel closes. Chrome blocks its own DevTools while this runs.',
   },
   tool: {
     running: 'Working on page',
@@ -257,6 +271,15 @@ const EN: PanelCopy = {
       browser_reload: 'Reload page',
       browser_get_text: 'Extract text',
       browser_wait: 'Wait for page',
+      browser_devtools_elements: 'Inspect element',
+      browser_devtools_set_element_style: 'Edit element CSS',
+      browser_devtools_set_element_attribute: 'Edit element attribute',
+      browser_console_eval: 'Run page JavaScript',
+      browser_console_logs: 'Read page console',
+      browser_devtools_network: 'Control network capture',
+      browser_devtools_list_requests: 'List network requests',
+      browser_devtools_get_request: 'Read request detail',
+      browser_devtools_request_body: 'Read request body',
     },
     overflow: (shown, total) => `${shown.join(' → ')} → ${total - shown.length} more`,
   },
@@ -307,6 +330,14 @@ const EN: PanelCopy = {
     sharingOff: 'Off',
     unrestrictedBrowserAccess: 'Allow unrestricted browser control',
     unrestrictedBrowserAccessHelp: 'Let the model read every HTTP(S) page, inspect all open tab titles and URLs, and perform actions—including following and closing tabs—without confirmation. Browser-protected page content remains inaccessible.',
+    allowDevTools: 'Allow developer tools',
+    allowDevToolsHelp: 'High privilege: lets the model inspect and modify page elements and CSS, run JavaScript in the page, and read captured network requests. Off by default, where every call asks for approval. Chrome cannot keep its own DevTools open on a tab while this is attached.',
+    devToolsUnsupported: 'Unavailable — this browser does not provide the debugger API.',
+    devToolsOff: 'Off — every call asks for approval.',
+    devToolsIdle: 'Enabled — the debugger attaches on the first call.',
+    devToolsAttached: 'Debugger attached',
+    devToolsError: 'Last error:',
+    devToolsDetach: 'Detach now',
     approvalNotifications: 'Browser approval notifications',
     approvalNotificationsHelp: 'Notify you when an approval arrives while the side panel is closed',
     autoResumeSession: "Resume this page's conversation",
@@ -465,8 +496,11 @@ const ZH: PanelCopy = {
     allowOnce: '仅允许这一次',
     alwaysAllowReads: '始终允许读取',
     trustSession: '本次会话信任此域',
+    devToolsTitle: '允许使用开发者工具？',
+    trustDevTools: '本次会话信任开发者工具',
     readFootnote: 'Esc 拒绝 · 可随时在设置中关闭自动读取',
     actionFootnote: 'Esc 拒绝 · 关闭侧栏后临时信任失效 · 输入内容不会显示',
+    devToolsFootnote: '开发者工具会暴露页面内部结构与抓包内容。此处的信任在侧栏关闭后失效；附加期间 Chrome 自身无法在该标签页打开开发者工具。',
   },
   tool: {
     running: '正在操作页面',
@@ -490,6 +524,15 @@ const ZH: PanelCopy = {
       browser_reload: '刷新页面',
       browser_get_text: '提取文字',
       browser_wait: '等待页面',
+      browser_devtools_elements: '查看元素',
+      browser_devtools_set_element_style: '修改元素 CSS',
+      browser_devtools_set_element_attribute: '修改元素属性',
+      browser_console_eval: '执行页面 JS',
+      browser_console_logs: '读取控制台',
+      browser_devtools_network: '控制网络抓包',
+      browser_devtools_list_requests: '列出网络请求',
+      browser_devtools_get_request: '查看请求详情',
+      browser_devtools_request_body: '读取请求正文',
     },
     overflow: (shown, total) => `${shown.join(' → ')} 等${total}个工具`,
   },
@@ -540,6 +583,14 @@ const ZH: PanelCopy = {
     sharingOff: '关闭',
     unrestrictedBrowserAccess: '允许模型完全控制浏览器',
     unrestrictedBrowserAccessHelp: '模型无需确认即可读取所有 HTTP(S) 页面、查看全部已打开标签页的标题和链接，并执行包括跟随、关闭标签页在内的所有操作。浏览器受保护页面的内容仍不可访问。',
+    allowDevTools: '允许开发者工具',
+    allowDevToolsHelp: '高权限功能：允许模型查看并修改页面元素与 CSS、在页面中执行 JavaScript、读取已捕获的网络请求。默认关闭，关闭时每次调用都会弹出审批。附加调试器期间，Chrome 无法在同一标签页打开自带的开发者工具。',
+    devToolsUnsupported: '不可用 —— 当前浏览器未提供调试器 API。',
+    devToolsOff: '已关闭 —— 每次调用都会请求审批。',
+    devToolsIdle: '已开启 —— 首次调用时附加调试器。',
+    devToolsAttached: '调试器已附加',
+    devToolsError: '最近一次错误：',
+    devToolsDetach: '立即断开',
     approvalNotifications: '浏览器审批通知',
     approvalNotificationsHelp: '侧栏关闭时收到审批请求，通过系统通知提醒你',
     autoResumeSession: '续接当前页面会话',

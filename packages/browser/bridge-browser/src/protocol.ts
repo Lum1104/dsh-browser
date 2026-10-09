@@ -60,6 +60,16 @@ export type RespondResult =
   | { ok: true; value?: unknown }
   | { ok: false; error: { code: string; message: string; details: Record<string, unknown> } }
 
+/**
+ * Developer-tools capability the extension advertises when it can drive a
+ * debugger session (Chrome only: `chrome.debugger`). Absent for platforms and
+ * builds without it, which keeps the devtools tools unregistered there.
+ */
+export interface DevToolsCaps {
+  /** Wire version of the devtools tool group. */
+  version: typeof DEVTOOLS_CAPS_VERSION
+}
+
 /** Capabilities negotiated in `hello`/`hello.ok`. The extension performs its own actions; these bounds shape page snapshots. */
 export interface BridgeCaps {
   /** The extension renders page state as text only (no screenshots). */
@@ -68,7 +78,28 @@ export interface BridgeCaps {
   snapshotMaxChars: number
   /** Upper bound on interactive inventory items per snapshot (plugin config). */
   maxInteractiveItems: number
+  /** Present only when the connected extension supports the developer-tools group. */
+  devTools?: DevToolsCaps
 }
+
+/** Version of the developer-tools tool group this plugin speaks. */
+export const DEVTOOLS_CAPS_VERSION = 1
+
+/**
+ * The developer-tools group's wire action names (tool name == action name).
+ * Registered only while the connected extension advertises `caps.devTools`.
+ */
+export const DEVTOOLS_TOOL_NAMES = [
+  'browser_devtools_elements',
+  'browser_devtools_set_element_style',
+  'browser_devtools_set_element_attribute',
+  'browser_console_eval',
+  'browser_console_logs',
+  'browser_devtools_network',
+  'browser_devtools_list_requests',
+  'browser_devtools_get_request',
+  'browser_devtools_request_body',
+] as const
 
 /** Frames sent by the extension to the bridge plugin. */
 export type ClientFrame =
@@ -235,6 +266,14 @@ function isCaps(value: unknown): value is BridgeCaps {
     && Number.isInteger(caps.snapshotMaxChars)
     && caps.snapshotMaxChars >= MIN_SNAPSHOT_MAX_CHARS
     && typeof caps.maxInteractiveItems === 'number' && caps.maxInteractiveItems > 0
+    // Optional: an older extension omits it and simply gets no devtools tools.
+    && (caps.devTools === undefined || isDevToolsCaps(caps.devTools))
+}
+
+/** Validate the optional developer-tools capability; unknown versions are unusable. */
+export function isDevToolsCaps(value: unknown): value is DevToolsCaps {
+  return typeof value === 'object' && value !== null
+    && (value as Record<string, unknown>).version === DEVTOOLS_CAPS_VERSION
 }
 
 function isToolError(value: unknown): value is ToolError {

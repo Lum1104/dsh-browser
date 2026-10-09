@@ -21,6 +21,9 @@ The **browser-operation end** of dsh: the model reads and operates the browser p
 | Close tab | `browser_close_tab` | Close a listed tab |
 | Read region | `browser_get_text` | Lazy-loaded content / partial text |
 | Wait | `browser_wait` | Page load and render-settle detection |
+| Inspect elements / CSS | `browser_devtools_elements` / `browser_devtools_set_element_style` / `browser_devtools_set_element_attribute` | High privilege: computed styles, box model, matched rules, live CSS and attribute edits for debugging |
+| Run page JavaScript | `browser_console_eval` / `browser_console_logs` | High privilege: evaluate in the page's own context and read recorded console output |
+| Capture network | `browser_devtools_network` / `browser_devtools_list_requests` / `browser_devtools_get_request` / `browser_devtools_request_body` | High privilege: captured request list, per-request detail, and bodies (credential headers redacted by default) |
 | Chat with images | `session.prompt` / `session.attachment` | Host-gated image selection, image-only sends, and durable history previews |
 | Quote what you highlight | side panel composer | The text you select in the page becomes a quote in the composer and rides along with your next message |
 
@@ -117,13 +120,24 @@ For extension-only development, load `extensions/dsh-browser/dist/` from `chrome
 - **Unrestricted control is explicit**: **Allow unrestricted browser control** becomes active only after the setting is saved successfully, then lets page reads, page actions, and tab list/follow/close operations run without confirmation. Calls capture their access mode when received, so enabling unrestricted control never retroactively elevates an existing restricted call. Disabling it takes effect immediately, cancels calls that have not dispatched an action, waits for already-dispatched browser operations to settle, and only then saves the restrictive setting. A rapid re-enable remains restricted until that revocation finishes, and concurrent saves persist in request order. Protected-page DOM content remains inaccessible.
 - **Conversation continuity**: reopening the panel resumes the most recently active browser conversation by default, falling back to the latest non-empty durable session before creating a new one. This can be disabled in Settings.
 
+## Developer tools (opt-in, high privilege)
+
+The developer-tools group drives the controlled tab through the Chrome debugger protocol (`chrome.debugger`), so it can inspect and edit page elements and CSS, run JavaScript in the page's own context, and capture network traffic — including response bodies, which page-level interception cannot read reliably.
+
+- **Off by default**: every developer-tools call raises its own approval dialog. The dialog has its own heading and can allow once, trust the group for the current side-panel session, or deny. The blanket **Allow unrestricted browser control** switch and the persistent origin allowlist never cover this group.
+- **Turn it on deliberately**: **Allow developer tools** in Settings is the only way to run these calls without a per-call prompt. Turning it off detaches the debugger immediately and cancels in-flight devtools calls; the session-scoped grant is cleared the moment the setting changes.
+- **One debugger per tab**: Chrome refuses a second debugger, so the browser's own DevTools cannot stay open on the same tab while capture is attached. The tool result explains this and tells you to close DevTools on that tab.
+- **Data handling**: capture is in memory only, bounded to 200 requests and 500 console entries, and resets on attach and on every top-level navigation. `Authorization`, `Cookie`, `Set-Cookie`, and similar header values are shown as `[redacted]` unless a call explicitly opts in, and bodies of authentication-shaped URLs are redacted by default.
+- **Platform**: Chrome only. The Firefox build does not request the `debugger` permission, so the host never registers the group there.
+
 ## Permissions
 
-Chrome uses `sidePanel`; Firefox uses `sidebar_action`. Both request `storage` (settings and recent-session continuity), `notifications` (optional reminders for approvals received while the panel is closed), `tabs` + `activeTab` + `scripting` (observe tab changes and inject/message the explicitly controlled tab, including lazy recovery for pages opened before install), `webNavigation` (enumerate and bind messages to that tab's frame documents), `alarms` (background keepalive), and `http/https` (content-script injection on normal pages). Firefox's AMO manifest declares the browsing activity, website content/activity, and personal communications that the add-on sends to the configured dsh/model service. The extension never changes the visible tab or silently follows a manual switch; background operation happens only after the user chooses to stay on the original tab.
+Chrome uses `sidePanel`; Firefox uses `sidebar_action`. Both request `storage` (settings and recent-session continuity), `notifications` (optional reminders for approvals received while the panel is closed), `tabs` + `activeTab` + `scripting` (observe tab changes and inject/message the explicitly controlled tab, including lazy recovery for pages opened before install), `webNavigation` (enumerate and bind messages to that tab's frame documents), `alarms` (background keepalive), and `http/https` (content-script injection on normal pages). Chrome additionally requests `debugger`, which is what the opt-in developer-tools group needs; the Firefox manifest omits it, so the group stays unavailable there. Firefox's AMO manifest declares the browsing activity, website content/activity, and personal communications that the add-on sends to the configured dsh/model service. The extension never changes the visible tab or silently follows a manual switch; background operation happens only after the user chooses to stay on the original tab.
 
 ## Known limitations
 
 - Only one extension connection at a time. An unopened browser profile never claims it; if another open panel replaces a live connection, the replaced client yields instead of starting a reconnect fight.
+- Developer tools are Chrome-only, need the user's setting or a per-call approval, and cannot attach while the browser's own DevTools is open on the same tab. Attaching shows Chrome's "being debugged" banner for that tab until the call finishes or the setting is turned off.
 - Tab affinity is global to that extension connection rather than per chat session.
 - Accessible cross-origin iframes are snapshotted and operated with stable `(frame, index)` addresses. Restricted or short-lived frames are reported as unavailable without failing the whole page snapshot.
 - Captcha/image-only controls cannot be handled — the tool result reports "elements with no accessible name" and asks the user to complete that step manually.

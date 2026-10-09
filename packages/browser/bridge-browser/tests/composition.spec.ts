@@ -323,6 +323,10 @@ describe('real Loader composition', () => {
     // The bridge plugin mounted the browser tool set on the real registry.
     const tools = ctx.get('tools') as ToolRegistry
     expect(tools.get('browser_snapshot')).toBeDefined()
+    // High-privilege developer tools stay unregistered until a connected
+    // extension advertises the capability.
+    expect(tools.get('browser_devtools_elements')).toBeUndefined()
+    expect(tools.get('browser_console_eval')).toBeUndefined()
 
     const browserPrompt = (await ctx.systemPrompt.assemble()).sections
       .find((section) => section.name === 'tool:bridge-browser')?.text
@@ -344,7 +348,9 @@ describe('real Loader composition', () => {
     const client = await connectReady(port)
     expect(client.frames.find((f) => f.t === 'hello.ok')).toEqual({
       t: 'hello.ok',
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
+      // `devTools` is the host's offer; the extension's own hello decides
+      // whether the matching tool group is registered (asserted below).
+      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60, devTools: { version: 1 } },
     })
 
     // Gateway RPC round-trip against the real session store.
@@ -363,6 +369,40 @@ describe('real Loader composition', () => {
     expect(listedText).toContain(sessionId)
 
     client.ws.close()
+  })
+
+  it('registers the developer-tools group only for a capability-advertising extension', { timeout: 60_000 }, async () => {
+    const { ctx, port } = await loadComposition()
+    const tools = ctx.get('tools') as ToolRegistry
+    expect(tools.get('browser_devtools_elements')).toBeUndefined()
+
+    const capabilityClient = await connect(port)
+    send(capabilityClient.ws, {
+      t: 'hello',
+      token: '',
+      caps: {
+        textOnly: true,
+        snapshotMaxChars: 32_000,
+        maxInteractiveItems: 60,
+        devTools: { version: 1 },
+      },
+    })
+    await waitFor(() => tools.get('browser_devtools_elements') !== undefined)
+    expect(tools.get('browser_devtools_network')).toBeDefined()
+    expect(tools.get('browser_console_eval')).toBeDefined()
+    // The plugin echoes the negotiated developer-tools capability back.
+    const ack = capabilityClient.frames.find((frame) => frame.t === 'hello.ok')
+    expect(ack).toMatchObject({ caps: { devTools: { version: 1 } } })
+
+    // A reconnect without the capability retracts the whole group.
+    const legacyClient = await connectReady(port)
+    await waitFor(() => tools.get('browser_devtools_elements') === undefined)
+    expect(tools.get('browser_console_eval')).toBeUndefined()
+    // The baseline set is untouched by the retraction.
+    expect(tools.get('browser_snapshot')).toBeDefined()
+
+    capabilityClient.ws.close()
+    legacyClient.ws.close()
   })
 
   it('unregisters the browser tools when the bridge fiber disposes (HMR safety)', { timeout: 60_000 }, async () => {

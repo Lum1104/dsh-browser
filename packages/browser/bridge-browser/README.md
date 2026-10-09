@@ -14,6 +14,7 @@ The **browser-operation bridge** for dsh: mounts a token-authenticated WebSocket
 | `toolTimeoutMs` | `number` | 90000 | Per-tool-call budget, leaving time for the extension's 60-second approval window. |
 | `snapshotMaxChars` | `number` | 32000 | Upper bound on one rendered snapshot's characters, minimum 500 (also negotiated to the extension via `hello.ok` caps). |
 | `maxInteractiveItems` | `number` | 60 | Upper bound on interactive inventory items per snapshot. |
+| `devToolsMaxChars` | `number` | 24000 | Upper bound on one developer-tools result's characters, minimum 500. |
 | `sessionWorkspacePath` | `string` | `~/.dsh/browser-sessions` | Dedicated Host Workspace for extension-created sessions. The plugin creates and idempotently registers the directory on the first implicit `session.create`; the session cwd becomes this path, so the GUI shows a `browser-sessions` workspace group. Set `""` to keep sessions Ungrouped. |
 | `deferSessionCreate` | `boolean` | `true` | Sessions materialize only on the first message: `session.create` answers with a provisional id (nothing persisted), history reads empty, and the first `session.prompt` creates the real session (same id, original payload). Opening the panel without chatting leaves zero trace in the session store/GUI. |
 
@@ -70,6 +71,20 @@ Each `respond` carries a globally unique transport id as well as the host intera
 | `browser_click` / `browser_type` / `browser_press` | Operate inventory items by stable index. |
 | `browser_scroll` / `browser_navigate` / `browser_open_tab` / `browser_back` / `browser_forward` / `browser_reload` | Page movement. |
 | `browser_get_text` / `browser_wait` | Read regions / settle detection. |
+
+### Developer tools (high privilege)
+
+This group is registered only while the connected extension advertises the `devTools` capability, which Chrome builds do and Firefox builds do not. The extension keeps its own consent in front of every call: unless the user turned on **Allow developer tools** in the side-panel settings, each call asks in the side panel (allow once / trust for this session / deny). The blanket browser-control switch and the persistent origin allowlist deliberately do **not** cover this group.
+
+| Tool | Purpose |
+|---|---|
+| `browser_devtools_elements` | Inspect an element (computed CSS, box model, matched rules, attributes) by CSS selector or `browser_snapshot` index. |
+| `browser_devtools_set_element_style` / `browser_devtools_set_element_attribute` | Live-debug CSS on an element (inline style or the matched stylesheet rule) and read/set/remove one attribute. Script-capable attributes are refused. |
+| `browser_console_eval` / `browser_console_logs` | Run JavaScript in the page's own context (optionally awaiting a promise) and read the console output recorded since attach. |
+| `browser_devtools_network` | Start/stop/status network capture for the controlled tab. |
+| `browser_devtools_list_requests` / `browser_devtools_get_request` / `browser_devtools_request_body` | List captured requests, read one in full, and fetch a request or response body. Credential headers (`Authorization`, `Cookie`, …) are redacted unless the caller opts in per call, and bodies of authentication-shaped URLs are redacted by default. |
+
+Capture notes: Chrome allows only one debugger per tab, so the browser's own DevTools cannot stay open on a tab while capture is attached; the error names that cause. Capture is in-memory, bounded (200 requests, 500 console entries) and resets on attach and on every top-level navigation. All returned page data is untrusted input.
 
 ## Model Experience
 

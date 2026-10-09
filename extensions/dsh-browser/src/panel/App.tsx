@@ -13,7 +13,7 @@ import type { BridgeCaps } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeState } from '../background/bridge.ts'
 import type { AffinityTab, TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
-import { connectPanel, PanelRpcError, type PanelApi, type PanelSettings } from './api.ts'
+import { connectPanel, PanelRpcError, type DevToolsStatus, type PanelApi, type PanelSettings } from './api.ts'
 import { renderMarkdown } from './markdown.ts'
 import whaleUrl from '../../assets/icons/deepseek-256.png'
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
@@ -470,6 +470,7 @@ function ApprovalDialog({
     return () => { window.removeEventListener('keydown', onKeyDown) }
   }, [request.id, onDecision])
 
+  const devTools = request.devTools === true
   return (
     <div className="approval-backdrop">
       <section className="approval-dialog" role="alertdialog" aria-modal="true" aria-labelledby="approval-title">
@@ -478,7 +479,9 @@ function ApprovalDialog({
           <span className="approval-shield"><ShieldIcon /></span>
           <div>
             <span className="eyebrow">{copy.approval.eyebrow}</span>
-            <h2 id="approval-title">{request.kind === 'read' ? copy.approval.readTitle : copy.approval.actionTitle}</h2>
+            <h2 id="approval-title">
+              {devTools ? copy.approval.devToolsTitle : request.kind === 'read' ? copy.approval.readTitle : copy.approval.actionTitle}
+            </h2>
           </div>
         </div>
         <div className="approval-detail">
@@ -494,21 +497,46 @@ function ApprovalDialog({
         <div className="approval-actions">
           <button className="deny" autoFocus onClick={() => onDecision('deny')}>{copy.approval.deny}</button>
           <button className="allow" onClick={() => onDecision('allow-once')}>{copy.approval.allowOnce}</button>
-          {request.kind === 'read' && (
+          {!devTools && request.kind === 'read' && (
             <button className="read-always" onClick={() => onDecision('always-allow-reads')}>{copy.approval.alwaysAllowReads}</button>
           )}
-          {request.kind === 'action' && request.canTrust && request.origins.length === 1 && (
+          {!devTools && request.kind === 'action' && request.canTrust && request.origins.length === 1 && (
             <button className="session-trust" onClick={() => onDecision('trust-session')}>{copy.approval.trustSession}</button>
+          )}
+          {devTools && (
+            <button className="session-trust" onClick={() => onDecision('trust-session')}>{copy.approval.trustDevTools}</button>
           )}
         </div>
         <small className="approval-footnote">
-          {request.kind === 'read'
-            ? copy.approval.readFootnote
-            : copy.approval.actionFootnote}
+          {devTools
+            ? copy.approval.devToolsFootnote
+            : request.kind === 'read'
+              ? copy.approval.readFootnote
+              : copy.approval.actionFootnote}
         </small>
       </section>
     </div>
   )
+}
+
+/**
+ * One-line description of the current developer-tools state.
+ *
+ * Before the background reports anything, the truthful description is the
+ * default posture: the capability is off and every call asks for approval.
+ */
+/** Whether the reported state carries a failure worth emphasizing. */
+function hasDevToolsError(status: DevToolsStatus | null): boolean {
+  return status !== null && status.error !== undefined && status.error !== ''
+}
+
+function devToolsStatusText(status: DevToolsStatus | null, copy: PanelCopy): string {
+  if (status === null) return copy.settings.devToolsOff
+  if (!status.supported) return copy.settings.devToolsUnsupported
+  if (status.error !== undefined && status.error !== '') return `${copy.settings.devToolsError} ${status.error}`
+  if (!status.enabled) return copy.settings.devToolsOff
+  if (status.attached) return `${copy.settings.devToolsAttached}${status.tabId === undefined ? '' : ` (tab ${status.tabId})`}`
+  return copy.settings.devToolsIdle
 }
 
 /**
@@ -795,12 +823,18 @@ export function App(): React.JSX.Element {
         token: raw?.token ?? '',
         sharePageContent: raw?.sharePageContent ?? 'auto',
         unrestrictedBrowserAccess: raw?.unrestrictedBrowserAccess ?? false,
+        allowDevTools: raw?.allowDevTools ?? false,
         trustedActionOrigins: raw?.trustedActionOrigins ?? [],
         approvalNotifications: raw?.approvalNotifications ?? true,
         autoResumeSession: raw?.autoResumeSession ?? true,
       })
     })
   }, [])
+
+  // Developer-tools state lives in the background: it owns the debugger
+  // attachment and reports every change here.
+  const [devToolsStatus, setDevToolsStatus] = useState<DevToolsStatus | null>(null)
+  useEffect(() => api.onDevToolsStatus(setDevToolsStatus), [api])
 
   // 每次连接重启（连接配置变更/断线重连）都新建会话。状态消息逐条监听：
   // React 会把 stopped/connecting 等瞬时状态合并进同一帧渲染，依赖渲染
@@ -1993,6 +2027,34 @@ export function App(): React.JSX.Element {
             />
             <span className="setting-toggle-control" aria-hidden="true"><span /></span>
           </label>
+          <div className="setting-toggle-row">
+            <label className="setting-toggle">
+              <span className="setting-toggle-copy">
+                <strong>{copy.settings.allowDevTools}</strong>
+                <small>{copy.settings.allowDevToolsHelp}</small>
+                {/* The state belongs to this switch, so it reads as its detail
+                    line rather than as a setting of its own. */}
+                <small className={`devtools-status${hasDevToolsError(devToolsStatus) ? ' is-error' : ''}`}>
+                  {devToolsStatusText(devToolsStatus, copy)}
+                </small>
+              </span>
+              <input
+                className="setting-toggle-input"
+                type="checkbox"
+                disabled={devToolsStatus !== null && !devToolsStatus.supported}
+                checked={settings?.allowDevTools ?? false}
+                onChange={(event) => setSettings((current) => current === null
+                  ? current
+                  : { ...current, allowDevTools: event.target.checked })}
+              />
+              <span className="setting-toggle-control" aria-hidden="true"><span /></span>
+            </label>
+            {devToolsStatus?.attached === true && (
+              <button className="secondary" onClick={() => { void api.detachDevTools().catch(() => {}) }}>
+                {copy.settings.devToolsDetach}
+              </button>
+            )}
+          </div>
           <label className="setting-toggle">
             <span className="setting-toggle-copy">
               <strong>{copy.settings.approvalNotifications}</strong>

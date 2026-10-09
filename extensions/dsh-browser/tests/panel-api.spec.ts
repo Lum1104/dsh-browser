@@ -396,3 +396,49 @@ describe('panel protocol', () => {
     await expect(pending).rejects.toThrow('Storage is unavailable')
   })
 })
+
+describe('developer-tools panel messages', () => {
+  function connectWithPort(): { receive: (message: unknown) => void; postMessage: ReturnType<typeof vi.fn> } {
+    let receive: ((message: unknown) => void) | undefined
+    const postMessage = vi.fn()
+    const port = {
+      postMessage,
+      onMessage: { addListener: vi.fn((listener: (message: unknown) => void) => { receive = listener }) },
+      onDisconnect: { addListener: vi.fn() },
+    }
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn(() => port) } })
+    return { receive: (message) => { receive?.(message) }, postMessage }
+  }
+
+  it('reports developer-tools state pushed after subscribing', async () => {
+    const { receive } = connectWithPort()
+    const api = connectPanel()
+    const seen: unknown[] = []
+    api.onDevToolsStatus((status) => { seen.push(status) })
+
+    receive({ type: 'devtools.status', supported: true, enabled: true, attached: true, tabId: 42 })
+    expect(seen).toEqual([{ supported: true, enabled: true, attached: true, tabId: 42 }])
+
+    receive({ type: 'devtools.status', supported: false, enabled: false, attached: false, error: 'another debugger' })
+    expect(seen[1]).toEqual({ supported: false, enabled: false, attached: false, error: 'another debugger' })
+  })
+
+  it('resolves the detach request only on its correlated result', async () => {
+    const { receive, postMessage } = connectWithPort()
+    vi.spyOn(crypto, 'randomUUID').mockReturnValue('11111111-1111-4111-8111-111111111111')
+    const api = connectPanel()
+
+    const pending = api.detachDevTools()
+    // Attach the rejection handler before the correlated result arrives, so the
+    // assertion observes it instead of the test runner reporting it unhandled.
+    const outcome = pending.then(() => 'resolved', (error: unknown) => (error as Error).message)
+    expect(postMessage).toHaveBeenCalledWith({ type: 'devtools.detach', id: '11111111-1111-4111-8111-111111111111' })
+
+    // A result for another id must not settle this request.
+    receive({ type: 'devtools.detach.result', id: 'other-id', ok: true })
+    expect(await Promise.race([outcome, Promise.resolve('pending')])).toBe('pending')
+
+    receive({ type: 'devtools.detach.result', id: '11111111-1111-4111-8111-111111111111', ok: false, error: { message: 'boom' } })
+    expect(await outcome).toBe('boom')
+  })
+})

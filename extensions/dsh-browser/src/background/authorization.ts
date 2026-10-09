@@ -2,7 +2,7 @@
 
 import type { ToolCall } from './tools.ts'
 import type { TabFrame } from './frames.ts'
-import type { ApprovalPrompt } from '../security/approval.ts'
+import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import { getUiLocale, type UiLocale } from '../i18n.ts'
 
 const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text'])
@@ -16,6 +16,100 @@ const STATE_CHANGING_ACTIONS = new Set([
   'browser_forward',
   'browser_reload',
 ])
+
+/**
+ * The developer-tools group. These calls drive the page through the debugger
+ * (CDP) instead of the content script, so they never consult the ordinary
+ * origin allowlist: only the explicit developer-tools setting, a session grant
+ * the user made in this browser, or a fresh per-call approval can pass.
+ */
+export const DEVTOOLS_TOOLS = new Set([
+  'browser_devtools_elements',
+  'browser_devtools_set_element_style',
+  'browser_devtools_set_element_attribute',
+  'browser_console_eval',
+  'browser_console_logs',
+  'browser_devtools_network',
+  'browser_devtools_list_requests',
+  'browser_devtools_get_request',
+  'browser_devtools_request_body',
+])
+
+/** Whether a tool belongs to the developer-tools group. */
+export function isDevToolsTool(name: string): boolean {
+  return DEVTOOLS_TOOLS.has(name)
+}
+
+/**
+ * The approval prompt for one developer-tools call.
+ *
+ * Every devtools call is high privilege, so the prompt always renders and can
+ * never be satisfied by the origin allowlist or unrestricted access. Only the
+ * model-facing presentation differs between read-shaped and action-shaped calls.
+ * @param call - the tool call awaiting a decision.
+ * @param frames - the controlled tab's frames, for the origin list.
+ * @param locale - UI locale for the summary text.
+ * @returns the prompt handed to the side panel.
+ */
+export function devToolsApprovalForCall(
+  call: ToolCall,
+  frames: TabFrame[],
+  locale: UiLocale = getUiLocale(),
+): ApprovalPrompt {
+  const destructive = call.name === 'browser_devtools_set_element_style'
+    || call.name === 'browser_devtools_set_element_attribute'
+    || call.name === 'browser_console_eval'
+  return {
+    kind: destructive ? 'action' : 'read',
+    action: call.name,
+    summary: summarizeDevToolsAction(call, locale),
+    origins: uniqueOrigins(frames.filter((frame) => frame.frameId === 0), frames),
+    // Session trust for devtools is granted through the dedicated prompt path,
+    // never as a blanket "trust this origin for every browser action".
+    canTrust: false,
+    devTools: true,
+  }
+}
+
+function summarizeDevToolsAction(call: ToolCall, locale: UiLocale): string {
+  const detail = inlineArg(call)
+  switch (call.name) {
+    case 'browser_devtools_elements':
+      return localized(locale, `Inspect page element (${detail})`, `查看页面元素（${detail}）`)
+    case 'browser_devtools_set_element_style':
+      return localized(locale, `Modify live CSS on page element (${detail})`, `修改页面元素 CSS（${detail}）`)
+    case 'browser_devtools_set_element_attribute':
+      return localized(locale, `Change page element attribute (${detail})`, `修改页面元素属性（${detail}）`)
+    case 'browser_console_eval':
+      return localized(
+        locale,
+        `Run JavaScript in the page (${typeof call.args.expression === 'string' ? `${call.args.expression.length} characters, not shown here}` : 'expression not shown'})`,
+        `在页面中执行 JavaScript（${typeof call.args.expression === 'string' ? `${call.args.expression.length} 个字符，此处不显示内容` : '表达式内容不显示'}）`,
+      )
+    case 'browser_console_logs':
+      return localized(locale, 'Read the page console output', '读取页面控制台输出')
+    case 'browser_devtools_network':
+      return localized(locale, `Control network capture (${safeInline(typeof call.args.action === 'string' ? call.args.action : 'status')})`, `控制网络抓包（${safeInline(typeof call.args.action === 'string' ? call.args.action : 'status')}）`)
+    case 'browser_devtools_list_requests':
+      return localized(locale, 'List captured network requests', '列出已捕获的网络请求')
+    case 'browser_devtools_get_request':
+      return localized(locale, `Read one captured request in full, including headers (index ${safeInline(String(call.args.index ?? '?'))})`, `查看单条网络请求的完整内容，含请求头（序号 ${safeInline(String(call.args.index ?? '?'))}）`)
+    case 'browser_devtools_request_body':
+      return localized(locale, `Read a captured request or response body (index ${safeInline(String(call.args.index ?? '?'))})`, `读取已捕获的请求或响应正文（序号 ${safeInline(String(call.args.index ?? '?'))}）`)
+    default:
+      return call.name
+  }
+}
+
+/** A short, non-secret hint about which element a call targets. */
+function inlineArg(call: ToolCall): string {
+  if (typeof call.args.selector === 'string' && call.args.selector !== '') return safeInline(call.args.selector)
+  if (typeof call.args.index === 'number') {
+    const frame = typeof call.args.frame === 'number' && call.args.frame !== 0 ? `, frame ${call.args.frame}` : ''
+    return `snapshot index ${call.args.index}${frame}`
+  }
+  return 'no selector given'
+}
 
 /** Return an approval prompt, or undefined when this call needs no prompt. */
 export function approvalPromptForCall(
@@ -168,4 +262,37 @@ function localized(locale: UiLocale, english: string, chinese: string): string {
 function safeInline(value: string, maxLength = 40): string {
   const inline = value.replace(/\s+/g, ' ').trim()
   return inline.length <= maxLength ? inline : `${inline.slice(0, maxLength - 1)}…`
+}
+
+/** Inputs the approval gate evaluates before a prompt is even sent. */
+export interface ApprovalGateInput {
+  prompt: ApprovalPrompt
+  /** Persisted "allow developer tools" setting. */
+  devToolsAllowed: boolean
+  /** Ephemeral devtools grant the user made in this side-panel session. */
+  devToolsSessionGrant: boolean
+  /** The user's blanket browser-control switch. */
+  unrestrictedAccess: boolean
+  /** Result of the persistent + session origin allowlist for ordinary actions. */
+  coveredByTrustedOrigins: boolean
+}
+
+/**
+ * Decide whether an approval prompt can be skipped.
+ *
+ * Developer tools are their own consent surface: unrestricted access and the
+ * persistent origin allowlist deliberately do not cover them, so enabling
+ * either can never hand the model the debugger. Ordinary actions keep the
+ * existing shortcut semantics.
+ *
+ * @param input - the prompt plus the policy state it is evaluated against.
+ * @returns the authorization to apply, or `'prompt'` when the user must decide.
+ */
+export function resolveApprovalGate(input: ApprovalGateInput): ApprovalAuthorization | 'prompt' {
+  if (input.prompt.devTools === true) {
+    if (input.devToolsSessionGrant || input.devToolsAllowed) return 'approved'
+    return 'prompt'
+  }
+  if (input.unrestrictedAccess || input.coveredByTrustedOrigins) return 'approved'
+  return 'prompt'
 }

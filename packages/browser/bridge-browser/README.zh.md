@@ -14,6 +14,7 @@ dsh 的**浏览器操作桥**：在宿主 webserver 上挂载一个 **token 认�
 | `toolTimeoutMs` | `number` | 90000 | 单次工具调用预算，为扩展的 60 秒审批窗口预留时间。 |
 | `snapshotMaxChars` | `number` | 32000 | 单次快照渲染字符上限，最小为 500（经 `hello.ok` caps 协商给扩展）。 |
 | `maxInteractiveItems` | `number` | 60 | 单次快照交互清单条数上限。 |
+| `devToolsMaxChars` | `number` | 24000 | 单次开发者工具结果渲染字符上限，最小为 500。 |
 | `sessionWorkspacePath` | `string` | `~/.dsh/browser-sessions` | 扩展创建的会话所用的专用 Host Workspace。插件会在首次调用未显式指定工作区的 `session.create` 时创建并幂等注册该目录；会话的 cwd 随之变为此路径，因此 GUI 会显示 `browser-sessions` 工作区分组。设为 `""` 可让会话继续显示在“未分组”中。 |
 | `deferSessionCreate` | `boolean` | `true` | 会话只在第一条消息时才真正创建：`session.create` 先返回一个内存暂定 ID（不落库），历史读取为空，第一次 `session.prompt` 才创建真实会话（同一 ID、回放原始创建参数）。只打开面板不说话，会在会话库/GUI 里不留任何痕迹。 |
 
@@ -70,6 +71,20 @@ npx @deepseek-ai/dsh@0.2.0-rc.2 web
 | `browser_click` / `browser_type` / `browser_press` | 按稳定编号操作清单元素。 |
 | `browser_scroll` / `browser_navigate` / `browser_open_tab` / `browser_back` / `browser_forward` / `browser_reload` | 页面移动。 |
 | `browser_get_text` / `browser_wait` | 读区域文本 / 稳定检测。 |
+
+### 开发者工具（高权限）
+
+该组只在已连接的扩展声明 `devTools` 能力时注册——Chrome 构建会声明，Firefox 构建不会。扩展对每次调用保留自己的同意门槛：除非用户在侧栏设置里打开**允许开发者工具**，否则每次调用都会在侧栏弹出审批（仅允许这一次 / 本次会话信任 / 拒绝）。"完全控制浏览器"开关与持久化的 origin 白名单**都不会**覆盖这一组。
+
+| 工具 | 用途 |
+|---|---|
+| `browser_devtools_elements` | 按 CSS 选择器或 `browser_snapshot` 编号查看元素（计算样式、盒模型、命中规则、属性）。 |
+| `browser_devtools_set_element_style` / `browser_devtools_set_element_attribute` | 现场调试 CSS（内联样式或命中的样式表规则）与读取/设置/删除单个属性。可执行脚本的属性会被拒绝。 |
+| `browser_console_eval` / `browser_console_logs` | 在页面自身上下文执行 JavaScript（可选等待 Promise），并读取附加后记录的控制台输出。 |
+| `browser_devtools_network` | 对受控标签页开始 / 停止 / 查询网络抓包。 |
+| `browser_devtools_list_requests` / `browser_devtools_get_request` / `browser_devtools_request_body` | 列出已捕获请求、查看单条完整内容、获取请求或响应正文。凭据类请求头（`Authorization`、`Cookie` 等）默认脱敏，除非单次调用显式选择；疑似认证 URL 的正文默认脱敏。 |
+
+抓包说明：Chrome 同一标签页只允许一个调试器，因此附加期间浏览器自带的开发者工具无法在该标签页打开，错误信息会点明这一原因。抓包数据保存在内存中且有上限（200 条请求、500 条控制台记录），附加时与每次顶层导航时都会重置。所有返回的页面数据都视为不可信输入。
 
 ## 模型体验
 
