@@ -647,6 +647,8 @@ export function App(): React.JSX.Element {
   const [approvalQueue, setApprovalQueue] = useState<ApprovalRequest[]>([])
   const [tabAffinity, setTabAffinity] = useState<TabAffinityState | null>(null)
   const [trustedOriginInput, setTrustedOriginInput] = useState('')
+  const [debuggerGranted, setDebuggerGranted] = useState<boolean | null>(null)
+  const [permissionNotice, setPermissionNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [showSessionPicker, setShowSessionPicker] = useState(false)
   const [loadingSessions, setLoadingSessions] = useState(false)
@@ -1633,6 +1635,40 @@ export function App(): React.JSX.Element {
     }
   }
 
+  /**
+   * Ask for the optional `debugger` permission behind the screenshot fallback.
+   *
+   * It is a user-gesture-only prompt, which is why the request lives on this
+   * explicit button rather than inside tool dispatch, and why nothing else in
+   * the panel ever calls it.
+   */
+  async function grantDebuggerPermission(): Promise<void> {
+    try {
+      const granted = await chrome.permissions.request({ permissions: ['debugger'] })
+      setDebuggerGranted(granted)
+      setPermissionNotice(granted ? copy.settings.screenshotGranted : copy.settings.screenshotDenied)
+    } catch (cause) {
+      setPermissionNotice(copy.settings.screenshotGrantFailed(cause instanceof Error ? cause.message : String(cause)))
+    }
+  }
+
+  /** Reflect the stored grant state every time the settings view is opened. */
+  useEffect(() => {
+    if (!showSettings) return
+    let cancelled = false
+    const read = async (): Promise<void> => {
+      try {
+        const granted = await chrome.permissions.contains({ permissions: ['debugger'] })
+        if (!cancelled) setDebuggerGranted(granted)
+      } catch {
+        // Without the API there is no grant to report, and the button stays usable.
+        if (!cancelled) setDebuggerGranted(false)
+      }
+    }
+    void read()
+    return () => { cancelled = true }
+  }, [showSettings])
+
   /** Load relay profiles from the llm-pi-ai settings namespace once per settings visit. */
   useEffect(() => {
     if (!showSettings || relayLoaded) return
@@ -2024,6 +2060,18 @@ export function App(): React.JSX.Element {
             <span className="setting-toggle-control" aria-hidden="true"><span /></span>
           </label>
         </div>
+        <section className="settings-panel screenshot-permission" aria-labelledby="screenshot-permission-title">
+          <span id="screenshot-permission-title">{copy.settings.screenshotSection}</span>
+          <small>{copy.settings.screenshotHelp}</small>
+          <button
+            className="secondary"
+            disabled={debuggerGranted === true}
+            onClick={() => { void grantDebuggerPermission() }}
+          >
+            {debuggerGranted === true ? copy.settings.screenshotGranted : copy.settings.screenshotGrant}
+          </button>
+          {permissionNotice !== null && <small role="status">{permissionNotice}</small>}
+        </section>
         <section className="relay-config" aria-labelledby="relay-title">
           <div className="relay-heading">
             <span id="relay-title">

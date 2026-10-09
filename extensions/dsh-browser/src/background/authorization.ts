@@ -5,7 +5,7 @@ import type { TabFrame } from './frames.ts'
 import type { ApprovalPrompt } from '../security/approval.ts'
 import { getUiLocale, type UiLocale } from '../i18n.ts'
 
-const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text'])
+const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text', 'browser_screenshot'])
 const STATE_CHANGING_ACTIONS = new Set([
   'browser_click',
   'browser_type',
@@ -32,9 +32,7 @@ export function approvalPromptForCall(
     return {
       kind: 'read',
       action: call.name,
-      summary: call.name === 'browser_snapshot'
-        ? localized(locale, 'Read the current page and accessible iframes', '读取当前页面及可访问 iframe')
-        : localized(locale, 'Read text from the specified area of the current page', '读取当前页面的指定文本区域'),
+      summary: readSummary(call, locale),
       origins: uniqueOrigins(targetFrames, frames),
       canTrust: false,
     }
@@ -104,6 +102,20 @@ export function originFromUrl(value: string): string | undefined {
   } catch {
     return undefined
   }
+}
+
+/**
+ * Reader-facing purpose of one page-reading tool, shown in the `ask`-mode read
+ * prompt. A screenshot is a read: it carries page pixels, not just text.
+ */
+function readSummary(call: ToolCall, locale: UiLocale): string {
+  if (call.name === 'browser_get_text') {
+    return localized(locale, 'Read text from the specified area of the current page', '读取当前页面的指定文本区域')
+  }
+  if (call.name === 'browser_screenshot') {
+    return localized(locale, 'Capture the visible area of the current page as an image', '截取当前页面的可见区域为图片')
+  }
+  return localized(locale, 'Read the current page and accessible iframes', '读取当前页面及可访问 iframe')
 }
 
 function summarizeAction(call: ToolCall, locale: UiLocale): string {

@@ -36,6 +36,13 @@ function mockChrome(options: {
   injectionError?: Error
   frames?: Array<{ frameId: number; parentFrameId: number; documentId?: string; url: string }>
   respond?: (message: unknown, frameId: number) => unknown
+  /** Set to false to simulate the optional `debugger` permission being withheld. */
+  debuggerGranted?: boolean
+  debuggerAttachError?: Error
+  /** What `Page.captureScreenshot` answers with over the debugger. */
+  captureResult?: unknown
+  /** What `chrome.tabs.captureVisibleTab` answers with, or an Error to make it fail. */
+  captureVisibleTabResult?: unknown
 }) {
   const responses = [...(options.responses ?? [OK])]
   const runtimeListeners = new Set<(message: unknown, sender: chrome.runtime.MessageSender) => void>()
@@ -75,10 +82,28 @@ function mockChrome(options: {
   const reload = vi.fn(async () => undefined)
   const remove = vi.fn(async () => undefined)
   const getAllFrames = vi.fn(async () => currentFrames())
+  const captureVisibleTab = vi.fn(async (_windowId?: number, _options?: unknown) => {
+    const answer = options.captureVisibleTabResult ?? 'data:image/jpeg;base64,QUJD'
+    if (answer instanceof Error) throw answer
+    return answer
+  })
+  const debuggerAttach = options.debuggerAttachError === undefined
+    ? vi.fn(async () => undefined)
+    : vi.fn(async () => { throw options.debuggerAttachError })
+  const debuggerDetach = vi.fn(async () => undefined)
+  const debuggerSendCommand = vi.fn(async (_target: unknown, command: string, _payload?: unknown) => {
+    switch (command) {
+      case 'Page.captureScreenshot': return options.captureResult ?? { data: 'QUJD' }
+      default: return undefined
+    }
+  })
+  const permissionsContains = vi.fn(async () => options.debuggerGranted !== false)
   vi.stubGlobal('chrome', {
-    tabs: { query, get, sendMessage, update, goBack, goForward, reload, remove },
+    tabs: { query, get, sendMessage, update, goBack, goForward, reload, remove, captureVisibleTab },
     scripting: { executeScript },
     webNavigation: { getAllFrames },
+    debugger: { attach: debuggerAttach, detach: debuggerDetach, sendCommand: debuggerSendCommand },
+    permissions: { contains: permissionsContains },
     runtime: {
       onMessage: {
         addListener: (listener: (message: unknown, sender: chrome.runtime.MessageSender) => void) => {
@@ -95,7 +120,24 @@ function mockChrome(options: {
       listener({ type: 'DSH_CONTENT_READY' }, { tab: { id: tabId }, frameId, documentId } as chrome.runtime.MessageSender)
     }
   }
-  return { emitContentReady, executeScript, get, getAllFrames, goBack, goForward, query, reload, remove, sendMessage, update }
+  return {
+    captureVisibleTab,
+    debuggerAttach,
+    debuggerDetach,
+    debuggerSendCommand,
+    emitContentReady,
+    executeScript,
+    get,
+    getAllFrames,
+    goBack,
+    goForward,
+    permissionsContains,
+    query,
+    reload,
+    remove,
+    sendMessage,
+    update,
+  }
 }
 
 afterEach(() => {
@@ -1056,5 +1098,182 @@ describe('dispatchOpenTab', () => {
     expect((answer.result as { text: string }).text).toContain('Call browser_snapshot again')
     expect(remove).not.toHaveBeenCalled()
     expect(sendMessage).not.toHaveBeenCalled()
+  })
+})
+
+describe('browser_screenshot', () => {
+  const shoot = (args: Record<string, unknown> = {}): ToolCall =>
+    ({ id: 'shot-1', name: 'browser_screenshot', args })
+  const REFUSED = new Error("Either the '<all_urls>' or 'activeTab' permission is required.")
+
+  it('captures the visible area with the browser call when the tab is already in front', async () => {
+    const chromeMock = mockChrome({
+      tab: { id: 60, windowId: 4, url: 'https://example.com', active: true },
+      captureVisibleTabResult: 'data:image/jpeg;base64,QUJD',
+    })
+
+    const answer = await dispatchToolCall(shoot(), 'auto')
+
+    const result = answer.result as { text: string; screenshot?: { mime: string; base64: string } }
+    expect(answer.ok).toBe(true)
+    expect(result.text).toContain('visible area')
+    expect(result.text).toContain('via chrome.tabs.captureVisibleTab')
+    expect(result.screenshot).toEqual({ mime: 'image/jpeg', base64: 'QUJD' })
+    expect(chromeMock.captureVisibleTab).toHaveBeenCalledWith(4, { format: 'jpeg', quality: 85 })
+    // The pixel route is the tab capture, and an already-visible tab is not touched.
+    expect(chromeMock.update).not.toHaveBeenCalled()
+    expect(chromeMock.debuggerAttach).not.toHaveBeenCalled()
+    expect(chromeMock.permissionsContains).not.toHaveBeenCalled()
+  })
+
+  it('brings a background tab forward before photographing it', async () => {
+    const chromeMock = mockChrome({
+      tab: { id: 63, windowId: 4, url: 'https://example.com', active: false },
+      captureVisibleTabResult: 'data:image/jpeg;base64,QUJD',
+    })
+
+    const answer = await dispatchToolCall(shoot(), 'auto')
+
+    const result = answer.result as { text: string }
+    expect(chromeMock.update).toHaveBeenCalledWith(63, { active: true })
+    expect(chromeMock.captureVisibleTab).toHaveBeenCalledWith(4, { format: 'jpeg', quality: 85 })
+    expect(result.text).toContain('brought to the front')
+  })
+
+  it('states which route produced the image', async () => {
+    const direct = mockChrome({
+      tab: { id: 64, windowId: 4, url: 'https://example.com', active: true },
+      captureVisibleTabResult: 'data:image/jpeg;base64,QUJD',
+    })
+    const throughTabCapture = await dispatchToolCall(shoot(), 'auto')
+
+    expect((throughTabCapture.result as { text: string }).text)
+      .toBe('Captured the visible area of the controlled tab as image/jpeg via chrome.tabs.captureVisibleTab.')
+    expect(direct.captureVisibleTab).toHaveBeenCalledOnce()
+
+    mockChrome({
+      tab: { id: 65, windowId: 4, url: 'https://example.com', active: true },
+      captureVisibleTabResult: REFUSED,
+    })
+    const throughDebugger = await dispatchToolCall(shoot(), 'auto')
+
+    const text = (throughDebugger.result as { text: string }).text
+    expect(text).toContain('through the debugger')
+    expect(text).toContain(REFUSED.message)
+  })
+
+  it('falls back to the debugger when captureVisibleTab is refused', async () => {
+    const chromeMock = mockChrome({
+      tab: { id: 61, windowId: 4, url: 'https://example.com', active: true },
+      captureVisibleTabResult: REFUSED,
+      captureResult: { data: 'QUJD' },
+    })
+
+    const answer = await dispatchToolCall(shoot({ format: 'jpeg', quality: 60 }), 'auto')
+
+    const result = answer.result as { text: string; screenshot?: { mime: string; base64: string } }
+    expect(answer.ok).toBe(true)
+    expect(result.screenshot).toEqual({ mime: 'image/jpeg', base64: 'QUJD' })
+    expect(result.text).toContain('debugger')
+    expect(chromeMock.permissionsContains).toHaveBeenCalledWith({ permissions: ['debugger'] })
+    expect(chromeMock.debuggerAttach).toHaveBeenCalledWith({ tabId: 61 }, '1.3')
+    expect(chromeMock.debuggerSendCommand).toHaveBeenCalledWith(
+      { tabId: 61 },
+      'Page.captureScreenshot',
+      { format: 'jpeg', quality: 60, fromSurface: true },
+    )
+    // The renderer produced the pixels and the session is always handed back.
+    expect(chromeMock.debuggerDetach).toHaveBeenCalledWith({ tabId: 61 })
+    expect(chromeMock.update).not.toHaveBeenCalled()
+  })
+
+  it('passes the requested png format and quality through both routes', async () => {
+    const throughTabCapture = mockChrome({
+      tab: { id: 66, windowId: 7, url: 'https://example.com', active: true },
+      captureVisibleTabResult: 'data:image/png;base64,QUJD',
+    })
+    const png = await dispatchToolCall(shoot({ format: 'png' }), 'auto')
+
+    // png carries no quality, and the mime comes from the data URL.
+    expect(throughTabCapture.captureVisibleTab).toHaveBeenCalledWith(7, { format: 'png' })
+    expect((png.result as { screenshot?: unknown }).screenshot).toEqual({ mime: 'image/png', base64: 'QUJD' })
+
+    const throughDebugger = mockChrome({
+      tab: { id: 67, windowId: 7, url: 'https://example.com', active: true },
+      captureVisibleTabResult: REFUSED,
+      captureResult: { data: 'QUJD' },
+    })
+    await dispatchToolCall(shoot({ format: 'png' }), 'auto')
+    expect(throughDebugger.debuggerSendCommand).toHaveBeenCalledWith(
+      { tabId: 67 },
+      'Page.captureScreenshot',
+      { format: 'png', fromSurface: true },
+    )
+
+    const clamped = mockChrome({
+      tab: { id: 68, windowId: 7, url: 'https://example.com', active: true },
+      captureVisibleTabResult: 'data:image/jpeg;base64,QUJD',
+    })
+    await dispatchToolCall(shoot({ format: 'jpeg', quality: 500 }), 'auto')
+    await dispatchToolCall(shoot({ format: 'jpeg', quality: -3 }), 'auto')
+    expect(clamped.captureVisibleTab).toHaveBeenNthCalledWith(1, 7, { format: 'jpeg', quality: 100 })
+    expect(clamped.captureVisibleTab).toHaveBeenNthCalledWith(2, 7, { format: 'jpeg', quality: 1 })
+  })
+
+  it('tells the user how to grant the debugger permission when it is missing', async () => {
+    const chromeMock = mockChrome({
+      tab: { id: 62, windowId: 4, url: 'https://example.com', active: true },
+      captureVisibleTabResult: REFUSED,
+      debuggerGranted: false,
+    })
+
+    const answer = await dispatchToolCall(shoot(), 'auto')
+
+    expect(answer).toMatchObject({
+      ok: false,
+      error: {
+        code: 'content-unavailable',
+        message: expect.stringContaining('debugger'),
+      },
+    })
+    const message = (answer.error as { message: string }).message
+    // Actionable: it names the exact place the user can turn the permission on.
+    expect(message).toContain('Settings')
+    expect(message).toContain('Screenshot capture (debugger)')
+    expect(chromeMock.debuggerAttach).not.toHaveBeenCalled()
+  })
+
+  it('reports an actionable attach failure when the debugger fallback cannot attach', async () => {
+    const chromeMock = mockChrome({
+      tab: { id: 69, windowId: 4, url: 'https://example.com', active: true },
+      captureVisibleTabResult: REFUSED,
+      debuggerAttachError: new Error('Another debugger is already attached'),
+    })
+
+    const answer = await dispatchToolCall(shoot(), 'auto')
+
+    expect(answer).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining('Could not attach the debugger') },
+    })
+    const message = (answer.error as { message: string }).message
+    expect(message).toContain('Another debugger is already attached')
+    expect(message).toContain('DevTools')
+    // A failed attach never held a session, so there is nothing to detach.
+    expect(chromeMock.debuggerDetach).not.toHaveBeenCalled()
+  })
+
+  it('does not capture anything while page content sharing is off', async () => {
+    const chromeMock = mockChrome({
+      tab: { id: 70, windowId: 4, url: 'https://example.com', active: true },
+    })
+
+    const answer = await dispatchToolCall(shoot(), 'off')
+
+    expect(answer).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining('Page content sharing is disabled') },
+    })
+    expect(chromeMock.captureVisibleTab).not.toHaveBeenCalled()
   })
 })

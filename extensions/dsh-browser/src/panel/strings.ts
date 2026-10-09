@@ -72,6 +72,12 @@ export interface PanelCopy {
     sharingAuto: string
     sharingAsk: string
     sharingOff: string
+    screenshotSection: string
+    screenshotHelp: string
+    screenshotGrant: string
+    screenshotGranted: string
+    screenshotDenied: string
+    screenshotGrantFailed: (reason: string) => string
     unrestrictedBrowserAccess: string
     unrestrictedBrowserAccessHelp: string
     approvalNotifications: string
@@ -256,6 +262,7 @@ const EN: PanelCopy = {
       browser_forward: 'Go forward',
       browser_reload: 'Reload page',
       browser_get_text: 'Extract text',
+      browser_screenshot: 'Capture screenshot',
       browser_wait: 'Wait for page',
     },
     overflow: (shown, total) => `${shown.join(' → ')} → ${total - shown.length} more`,
@@ -305,6 +312,12 @@ const EN: PanelCopy = {
     sharingAuto: 'Share automatically (default)',
     sharingAsk: 'Ask every time',
     sharingOff: 'Off',
+    screenshotSection: 'Screenshot capture',
+    screenshotHelp: 'Screenshots usually come from the browser\'s tab-capture API. Granting the debugger permission lets the assistant capture the visible area through the DevTools protocol when that call is refused; the browser only shows its "being controlled" banner while a capture is running.',
+    screenshotGrant: 'Grant debugger permission',
+    screenshotGranted: 'Debugger permission granted',
+    screenshotDenied: 'The debugger permission was not granted, so screenshot capture will report the refusal.',
+    screenshotGrantFailed: (reason) => `Could not request the debugger permission: ${reason}`,
     unrestrictedBrowserAccess: 'Allow unrestricted browser control',
     unrestrictedBrowserAccessHelp: 'Let the model read every HTTP(S) page, inspect all open tab titles and URLs, and perform actions—including following and closing tabs—without confirmation. Browser-protected page content remains inaccessible.',
     approvalNotifications: 'Browser approval notifications',
@@ -489,6 +502,7 @@ const ZH: PanelCopy = {
       browser_forward: '前进下一页',
       browser_reload: '刷新页面',
       browser_get_text: '提取文字',
+      browser_screenshot: '截取画面',
       browser_wait: '等待页面',
     },
     overflow: (shown, total) => `${shown.join(' → ')} 等${total}个工具`,
@@ -538,6 +552,12 @@ const ZH: PanelCopy = {
     sharingAuto: '自动共享（默认）',
     sharingAsk: '每次询问',
     sharingOff: '关闭',
+    screenshotSection: '截图能力',
+    screenshotHelp: '截图默认走浏览器的标签页捕获接口。授予 debugger 权限后，该接口被拒绝时助手可通过 DevTools 协议捕获可见区域；浏览器仅在截图进行中显示「正在受控」横幅。',
+    screenshotGrant: '授予 debugger 权限',
+    screenshotGranted: '已授予 debugger 权限',
+    screenshotDenied: '未授予 debugger 权限，截图会直接报告被拒绝的原因。',
+    screenshotGrantFailed: (reason) => `无法请求 debugger 权限：${reason}`,
     unrestrictedBrowserAccess: '允许模型完全控制浏览器',
     unrestrictedBrowserAccessHelp: '模型无需确认即可读取所有 HTTP(S) 页面、查看全部已打开标签页的标题和链接，并执行包括跟随、关闭标签页在内的所有操作。浏览器受保护页面的内容仍不可访问。',
     approvalNotifications: '浏览器审批通知',

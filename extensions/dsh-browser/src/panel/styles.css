@@ -2317,6 +2317,30 @@ textarea:focus-visible {
   box-shadow: 0 6px 18px rgba(23, 32, 51, 0.05);
 }
 
+.screenshot-permission {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 13px;
+}
+
+.screenshot-permission > span {
+  color: var(--ink);
+  font-size: calc(12px * var(--ui-scale));
+  font-weight: 680;
+}
+
+.screenshot-permission small {
+  margin: 0;
+  color: var(--faint);
+  font-size: calc(9.5px * var(--ui-scale));
+  line-height: 1.45;
+}
+
+.screenshot-permission button {
+  align-self: flex-start;
+}
+
 .trusted-origins > div:first-child {
   display: flex;
   flex-direction: column;
