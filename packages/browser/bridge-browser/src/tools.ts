@@ -1,13 +1,18 @@
 /**
  * Model-facing browser tools. Every tool executes by dispatching a `tool.call`
  * over the bridge to the connected extension, which performs the action in the
- * user's explicitly controlled tab and returns a pure-text result.
+ * user's explicitly controlled tab and returns a text result.
  *
  * The browser tool surface uses structured text by design:
  * `browser_snapshot` renders the page as structured text with a numbered
  * interactive inventory, and every other tool addresses elements by that
  * inventory's stable index. Results are single `{ text }` objects rendered as
  * one text ContentBlock.
+ *
+ * `browser_screenshot` is the one exception, and it keeps the same model-facing
+ * shape: the extension returns image bytes beside its text, this module writes
+ * them to a local file, and the model sees only that path. The base64 payload
+ * never reaches the tool result, so the wire stays text for the model.
  *
  * @module
  */
@@ -66,6 +71,7 @@ export const BROWSER_TOOL_NAMES = [
   'browser_forward',
   'browser_reload',
   'browser_get_text',
+  'browser_screenshot',
   'browser_wait',
 ] as const
 
@@ -91,6 +97,8 @@ export function registerBrowserTools(
     const result = sessionId === undefined
       ? await bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs)
       : await bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs, sessionId)
+    const screenshot = extractScreenshot(result)
+    if (screenshot !== undefined) return await screenshotResult(result, screenshot, name)
     return normalizeTextResult(result, name)
   }
 
@@ -106,6 +114,65 @@ function normalizeTextResult(result: unknown, name: string): TextResult {
     return { text: (result as { text: string }).text }
   }
   return { text: `${name} returned no text: ${JSON.stringify(result)}` }
+}
+
+/**
+ * One captured page image carried alongside the extension's text answer.
+ *
+ * The model-facing tool surface stays text: the extension ships pixels as
+ * base64 inside the tool result and this module is the only place that turns
+ * them into a file. The model never receives the base64 — it receives a path it
+ * can open with `read_image`.
+ */
+interface ScreenshotPayload {
+  mime: string
+  base64: string
+}
+
+/** Subdirectory of the OS temp directory that receives captured screenshots. */
+const SCREENSHOT_DIR = 'dsh-browser-screenshots'
+
+/** Pull a screenshot payload out of an extension result, when one is present. */
+function extractScreenshot(result: unknown): ScreenshotPayload | undefined {
+  if (typeof result !== 'object' || result === null) return undefined
+  const raw = (result as { screenshot?: unknown }).screenshot
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const { mime, base64 } = raw as { mime?: unknown; base64?: unknown }
+  if (typeof mime !== 'string' || typeof base64 !== 'string' || base64 === '') return undefined
+  return { mime, base64 }
+}
+
+/** Write the captured image to a temp file and report its path to the model. */
+async function screenshotResult(
+  result: unknown,
+  screenshot: ScreenshotPayload,
+  name: string,
+): Promise<TextResult> {
+  const base = normalizeTextResult(result, name).text
+  try {
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const directory = join(tmpdir(), SCREENSHOT_DIR)
+    await mkdir(directory, { recursive: true })
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const suffix = screenshot.mime === 'image/png' ? 'png' : 'jpg'
+    const path = join(directory, `${stamp}-${Math.random().toString(36).slice(2, 8)}.${suffix}`)
+    const bytes = Buffer.from(screenshot.base64, 'base64')
+    await writeFile(path, bytes)
+    const kb = Math.max(1, Math.round(bytes.byteLength / 1024))
+    return {
+      text: `${base}\n\nThe image is saved as ${screenshot.mime} (${kb} KB): ${path}\nRead that path with read_image to actually see the page.`,
+    }
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return { text: `${base}\n\nThe image was captured but could not be saved to disk: ${detail}` }
+  }
+}
+
+/** Drop the parameters the model left out, so the wire carries only real intent. */
+function withoutUndefined(values: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(values).filter(([, value]) => value !== undefined))
 }
 
 interface Call {
@@ -280,6 +347,21 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     },
   })
 
+  const screenshot = (): ToolDefinition => defineTool({
+    name: 'browser_screenshot',
+    description: `Capture the visible area of the controlled tab as an image and save it to a local file; read that path with read_image to see it. Use it for visual content (captcha, chart, layout) or pictures browser_get_text cannot reach. ${UNTRUSTED_CONTENT_WARNING}`,
+    parameters: {
+      format: { type: 'string', enum: ['jpeg', 'png'], description: 'Defaults to jpeg, which is much smaller.' },
+      quality: { type: 'number', description: 'JPEG quality 1-100. Defaults to 85.' },
+    },
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: (args, exec) => {
+      const a = args as { format?: 'jpeg' | 'png'; quality?: number }
+      return call(exec, 'browser_screenshot', withoutUndefined({ format: a.format, quality: a.quality }))
+    },
+  })
+
   const wait = (): ToolDefinition => defineTool({
     name: 'browser_wait',
     description: 'Wait for loading and DOM changes to settle, with an optional extra delay.',
@@ -313,6 +395,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     simple('browser_forward', 'Go forward to the next page.'),
     simple('browser_reload', 'Reload the current page.'),
     getText(),
+    screenshot(),
     wait(),
   ]
 }

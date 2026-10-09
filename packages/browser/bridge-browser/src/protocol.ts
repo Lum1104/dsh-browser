@@ -62,7 +62,12 @@ export type RespondResult =
 
 /** Capabilities negotiated in `hello`/`hello.ok`. The extension performs its own actions; these bounds shape page snapshots. */
 export interface BridgeCaps {
-  /** The extension renders page state as text only (no screenshots). */
+  /**
+   * Page state reaches the model as text, not as inline images. A capture is
+   * still possible: `browser_screenshot` returns base64 pixels beside its text
+   * answer, and the bridge writes them to a local file so the model is handed a
+   * path instead of image bytes.
+   */
   textOnly: true
   /** Upper bound on one rendered snapshot's characters (plugin config, minimum 500). */
   snapshotMaxChars: number

@@ -1,6 +1,7 @@
 /**
  * `@yuxianglin/dsh-bridge-browser`: token-authenticated WebSocket bridge for
- * the browser extension plus the text-only `browser_*` tool set.
+ * the browser extension plus the text-result `browser_*` tool set (a captured
+ * screenshot arrives as base64 beside the text and is saved to a local file).
  *
  * The bridge mounts its own upgrade route (`/ext/bridge`) on the host
  * webserver, OUTSIDE the /api trust fence — so it brings its own bearer-token
