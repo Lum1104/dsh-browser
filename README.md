@@ -8,7 +8,7 @@ Connect [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to t
 
 `dsh` is DeepSeek AI's open-source, plugin-based agent harness. This repository provides a companion browser bridge plugin and Chrome/Firefox MV3 extension as one standalone pnpm workspace.
 
-Browser operation remains text-only: pages become structured text with a numbered inventory of interactive elements, and the model addresses those elements by number. dsh 0.2.0 multimodal chat is separate from that page channel—the side panel accepts PNG, JPEG, WebP, and GIF attachments when the host advertises image support, while browser tools still never capture screenshots.
+Browser operation is text-first: pages become structured text with a numbered inventory of interactive elements, and the model addresses those elements by number. `browser_screenshot` adds the one image path — the extension captures the visible area, the bridge writes those bytes to a local file, and the model receives that path instead of pixels. dsh 0.2.0 multimodal chat is separate from that page channel: the side panel accepts PNG, JPEG, WebP, and GIF attachments when the host advertises image support.
 
 > [!IMPORTANT]
 > The workspace pins dsh 0.2.0-rc.2, the minimum supported runtime. Older DSH releases are not supported.
@@ -59,6 +59,7 @@ The paired Playwright / extension duration ratio was **1.24** (95% CI **1.16–1
 | Follow tab | `browser_follow_tab` | Bind later browser tools to a tab returned by `browser_list_tabs` without activating it |
 | Close tab | `browser_close_tab` | Close a tab returned by `browser_list_tabs` |
 | Read region | `browser_get_text` | Lazy-loaded or partial page text |
+| Capture the view | `browser_screenshot` | Save the visible area as a local image and return its path for `read_image`; use it for visual content (captcha, chart, layout) |
 | Wait for stability | `browser_wait` | Page-load and render-settle detection |
 | Send images | `session.prompt` / `session.attachment` | Host-capability-gated image drafts, image-only prompts, and durable history previews |
 | Quote a selection | side panel composer | Text you highlight in the page appears in the composer and is sent with your next message as fenced, attributed page content |
@@ -76,7 +77,7 @@ scripts/install.ps1
 ## Why this design
 
 - **Your real browser, not a headless copy**: the model works in the page you already have open, retaining logins, sessions, and cookies.
-- **A text-first page interface**: numbered controls, stable IDs across snapshots, delta updates, and masked sensitive values make pages operable without screenshots; user-attached chat images use dsh's separate multimodal message path.
+- **A text-first page interface**: numbered controls, stable IDs across snapshots, delta updates, and masked sensitive values make pages operable as text; `browser_screenshot` is the deliberate exception, and its pixels are saved to a local file rather than entering the conversation. User-attached chat images use dsh's separate multimodal message path.
 - **Pointing instead of describing**: highlight the passage you mean and the side panel quotes it, so "explain this" needs no page tour. The quote is captured only while a panel is open, and nothing is sent until you send the message.
 - **A narrow privacy boundary**: passwords and payment-card values are always rendered as `••••` and never leave the page.
 - **A guarded bridge**: authenticated handshakes protect remote connections, privileged gateway methods reject non-loopback callers, and the extension binds tools to one user-controlled tab.
@@ -185,7 +186,7 @@ If you encounter `cache.hydratePrepared is not a function`, update the repositor
 - The bridge path sits outside the `/api` trust boundary and performs its own bearer-token authentication.
 - Local Chrome extension origins retain zero-configuration loopback access; Firefox origins are per-install UUIDs and must present the bearer token.
 - Privileged gateway methods such as `settings.*`, `credentials.*`, and `host.open*` reject non-loopback sources.
-- The browser-page pipeline is text-only and never captures screenshots; explicitly attached chat images use dsh's durable attachment service. Password and payment-card values never leave the page.
+- The browser-page pipeline returns text, and its single image route (`browser_screenshot`) writes each capture to a local temp file so the model is handed a path rather than pixels; explicitly attached chat images use dsh's durable attachment service. Password and payment-card values never leave the page.
 - When work begins, the assistant binds to the active tab (at prompt submission, or at the first direct browser-tool call). If you switch tabs manually, later browser actions pause and the side panel asks whether the assistant should continue on the original tab or follow the new one. Choosing the original tab permits background operation; the extension never silently retargets or changes your visible tab. Closing the controlled tab also pauses tools until you explicitly select the current page.
 - Text you highlight is captured only while a side panel is open and page sharing is not `off`, and never from password or payment-card fields. It stays inside the extension until you send the message, is dropped when you dismiss it or its page navigates or closes, and reaches the model inside the same untrusted-content boundary as page snapshots — including its source title and URL, which the page also controls.
 - Page-authored text is wrapped as untrusted input. The default `auto` mode reads only the controlled tab without an extra prompt; privacy-sensitive users can select `ask` for per-read confirmation or `off` to block reads entirely. In `ask` mode, the read dialog can allow one read or persistently switch back to `auto`; this can be reversed in Settings. Read page text is sent to the selected model.

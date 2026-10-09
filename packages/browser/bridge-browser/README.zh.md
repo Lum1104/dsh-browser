@@ -2,9 +2,9 @@
 
 [English](README.md) | 中文
 
-dsh 的**浏览器操作桥**：在宿主 webserver 上挂载一个 **token 认证的 WebSocket 通道**（`/ext/bridge`），供 Chrome 扩展连接；把扩展调用投影到 dsh 0.2.0 Typert Remotes、按连接跟随 Session 与 Remote Event 流，并注册**纯文本**的 `browser_*` 工具集——经扩展在真实浏览器中读取页面、点击元素、填写表单、滚动与导航，登录态保留。侧边栏是对话入口，工具才是产品本体。
+dsh 的**浏览器操作桥**：在宿主 webserver 上挂载一个 **token 认证的 WebSocket 通道**（`/ext/bridge`），供 Chrome 扩展连接；把扩展调用投影到 dsh 0.2.0 Typert Remotes、按连接跟随 Session 与 Remote Event 流，并注册 `browser_*` 工具集——经扩展在真实浏览器中读取页面、点击元素、填写表单、滚动与导航，登录态保留。侧边栏是对话入口，工具才是产品本体。
 
-**纯文本浏览器工具，多模态对话透传**：页面快照仍是结构化文本（标题、正文、带编号的交互清单、敏感值打码的表单字段），所有浏览器动作按稳定编号寻址。通用 RPC 通道也会透传 dsh 0.2.0 的图片消息和持久附件读取；延迟创建的新会话只在宿主确实挂载附件服务时声明图片限制。
+**文本结果 + 一张落盘图片 + 多模态对话透传**：页面快照仍是结构化文本（标题、正文、带编号的交互清单、敏感值打码的表单字段），所有浏览器动作按稳定编号寻址。`browser_screenshot` 在文本答案旁返回 base64 像素，由本包写成本地文件，因此模型拿到的是路径而不是图片字节。通用 RPC 通道也会透传 dsh 0.2.0 的图片消息和持久附件读取；延迟创建的新会话只在宿主确实挂载附件服务时声明图片限制。
 
 ## 配置
 
@@ -51,7 +51,7 @@ npx @deepseek-ai/dsh@0.2.0-rc.2 web
 - `/api` 载体钉在回环上的方法（`settings.*`、`credentials.*`、`host.pickDirectory`、`host.openPath`）对非回环来源**即使 token 正确也拒绝**——对 `--host 0.0.0.0` 部署的纵深防御。
 - 同一时刻仅一个活动连接，新认证连接顶替旧连接。
 - 桥是 confused-deputy 边界而非通用认证层：不要把 `dsh web --host 0.0.0.0` 暴露在不信任的网络上。
-- 抽取的页面文字会标记为模型的不可信输入。页面读取遵循扩展的询问/自动/关闭策略；状态变更工具必须经过按 origin 的侧边栏决策，没有侧边栏时失败关闭。同源后续操作可只在当前侧栏会话中临时信任，永久信任仍需显式设置。
+- 抽取的页面文字会标记为模型的不可信输入。页面读取遵循扩展的询问/自动/关闭策略；状态变更工具必须经过按 origin 的侧边栏决策，没有侧边栏时失败关闭。`browser_screenshot` 的截图同样属于页面读取，受同一策略约束：扩展回传像素，本包写入临时文件，只有该本机路径会到达模型。同源后续操作可只在当前侧栏会话中临时信任，永久信任仍需显式设置。
 
 ## 线协议
 
@@ -70,6 +70,7 @@ npx @deepseek-ai/dsh@0.2.0-rc.2 web
 | `browser_click` / `browser_type` / `browser_press` | 按稳定编号操作清单元素。 |
 | `browser_scroll` / `browser_navigate` / `browser_open_tab` / `browser_back` / `browser_forward` / `browser_reload` | 页面移动。 |
 | `browser_get_text` / `browser_wait` | 读区域文本 / 稳定检测。 |
+| `browser_screenshot` | 截取可见区域并存到系统临时目录下的文件；工具结果给出该路径以及图片是哪条路径产出的，base64 不会到达模型。 |
 
 ## 模型体验
 
