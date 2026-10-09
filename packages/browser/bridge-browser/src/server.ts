@@ -28,6 +28,7 @@ import {
   BRIDGE_SESSION_PURGE_METHOD,
   HELLO_TIMEOUT_MS,
   PING_INTERVAL_MS,
+  isDevToolsCaps,
   parseBridgeFrame,
   type BridgeFrame,
   type BridgeCaps,
@@ -89,6 +90,11 @@ export interface BridgeServerDeps {
   toolTimeoutMs: number
   /** Capabilities to echo in `hello.ok` (negotiated snapshot budgets). */
   caps: BridgeCaps
+  /**
+   * Called after each accepted `hello`, with the capabilities that connection
+   * advertised. The plugin re-evaluates the developer-tools tool group here.
+   */
+  onCapsChange?: (clientCaps: BridgeCaps) => void
   /** Seed a followed-page snapshot into a live or deferred Agent session. */
   injectBrowserSnapshot: (sessionId: string, snapshot: string) => void | Promise<void>
   /**
@@ -120,6 +126,8 @@ interface ReadyConnection {
   ws: WebSocket
   /** Remote address captured at upgrade time (loopback gate for privileged methods). */
   remoteAddress: string | undefined
+  /** Capabilities the extension advertised in its `hello`. */
+  clientCaps: BridgeCaps
   abort: AbortController
   pump: Promise<void>
   ping: NodeJS.Timeout
@@ -273,6 +281,15 @@ export class BridgeServer {
     return this.current !== null
   }
 
+  /**
+   * Whether the connected extension can serve the developer-tools group.
+   * Read by the plugin when it (re)registers that tool group.
+   * @returns true only for a live connection whose `hello` advertised devtools.
+   */
+  devToolsSupported(): boolean {
+    return isDevToolsCaps(this.current?.clientCaps.devTools)
+  }
+
   private attach(ws: WebSocket, remoteAddress: string | undefined, origin: string | undefined): void {
     let helloTimer: NodeJS.Timeout | undefined = setTimeout(() => {
       ws.close(4001, 'hello timeout')
@@ -310,7 +327,7 @@ export class BridgeServer {
         }
         clearTimeout(helloTimer)
         helloTimer = undefined
-        this.promote(ws, remoteAddress)
+        this.promote(ws, remoteAddress, frame.caps)
         return
       }
       this.handleReadyFrame(frame)
@@ -325,7 +342,7 @@ export class BridgeServer {
   }
 
   /** Promote an authenticated socket to the single active slot. */
-  private promote(ws: WebSocket, remoteAddress: string | undefined): void {
+  private promote(ws: WebSocket, remoteAddress: string | undefined, clientCaps: BridgeCaps): void {
     this.replaceConnection()
     const abort = new AbortController()
     const ping = setInterval(() => { sendFrame(ws, { t: 'ping' }) }, this.deps.pingIntervalMs ?? PING_INTERVAL_MS)
@@ -348,8 +365,11 @@ export class BridgeServer {
         }
       }
     })()
-    this.current = { ws, remoteAddress, abort, pump, ping }
+    this.current = { ws, remoteAddress, clientCaps, abort, pump, ping }
     sendFrame(ws, { t: 'hello.ok', caps: this.deps.caps })
+    // Notify only after the new connection owns the slot, so a listener reading
+    // `devToolsSupported()` sees the capability that just arrived.
+    this.deps.onCapsChange?.(clientCaps)
     ws.once('close', () => {
       clearInterval(ping)
       abort.abort()

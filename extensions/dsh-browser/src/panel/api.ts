@@ -89,7 +89,27 @@ interface SessionResumeHintMessage {
   sessionId: string | null
 }
 
-type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | SelectionMessage | SessionResumeHintMessage
+/** Developer-tools availability and attachment state reported by the background. */
+export interface DevToolsStatus {
+  supported: boolean
+  enabled: boolean
+  attached: boolean
+  tabId?: number
+  error?: string
+}
+
+interface DevToolsStatusMessage extends DevToolsStatus {
+  type: 'devtools.status'
+}
+
+interface DevToolsDetachResultMessage {
+  type: 'devtools.detach.result'
+  id: string
+  ok: boolean
+  error?: { message?: unknown }
+}
+
+type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | SelectionMessage | SessionResumeHintMessage | DevToolsStatusMessage | DevToolsDetachResultMessage
 
 /** Structured gateway failure retained for product-level error handling. */
 export class PanelRpcError extends Error {
@@ -122,6 +142,9 @@ export interface PanelApi {
   onTabAffinity(callback: (state: TabAffinityState) => void): () => void
   onSelection(callback: (selection: PageSelection | null) => void): () => void
   onSessionResumeHint(callback: (sessionId: string | null) => void): () => void
+  onDevToolsStatus(callback: (status: DevToolsStatus) => void): () => void
+  /** Detach the debugger now, keeping the developer-tools setting as it is. */
+  detachDevTools(): Promise<void>
   respondToApproval(id: string, decision: ApprovalDecision): Promise<void>
   resolveTabAffinity(revision: number, decision: TabAffinityDecision, sessionId: string | null): Promise<void>
   rebindTabAffinity(): Promise<void>
@@ -157,6 +180,8 @@ export function connectPanel(): PanelApi {
   const tabAffinityListeners = new Set<(state: TabAffinityState) => void>()
   const selectionListeners = new Set<(selection: PageSelection | null) => void>()
   const sessionResumeHintListeners = new Set<(sessionId: string | null) => void>()
+  const devToolsStatusListeners = new Set<(status: DevToolsStatus) => void>()
+  const pendingDetaches = new Map<string, { resolve: () => void; reject: (error: Error) => void }>()
 
   let port: chrome.runtime.Port | null = null
   let reconnectPromise: Promise<chrome.runtime.Port> | null = null
@@ -234,6 +259,25 @@ export function connectPanel(): PanelApi {
       case 'session.resume-hint':
         for (const listener of sessionResumeHintListeners) listener(msg.sessionId)
         break
+      case 'devtools.status':
+        for (const listener of devToolsStatusListeners) listener({
+          supported: msg.supported === true,
+          enabled: msg.enabled === true,
+          attached: msg.attached === true,
+          ...(typeof msg.tabId === 'number' ? { tabId: msg.tabId } : {}),
+          ...(typeof msg.error === 'string' ? { error: msg.error } : {}),
+        })
+        break
+      case 'devtools.detach.result': {
+        const entry = pendingDetaches.get(msg.id)
+        if (entry === undefined) return
+        pendingDetaches.delete(msg.id)
+        if (msg.ok) entry.resolve()
+        else entry.reject(new Error(typeof msg.error?.message === 'string'
+          ? msg.error.message
+          : (getUiLocale() === 'zh' ? '无法断开调试器' : 'Failed to detach the debugger')))
+        break
+      }
     }
   }
 
@@ -242,7 +286,7 @@ export function connectPanel(): PanelApi {
     return cause instanceof Error ? cause : new Error(fallback)
   }
 
-  function failAll(error: Error, preserve?: { kind: 'rpc' | 'respond' | 'rebind' | 'settings'; id: string }): void {
+  function failAll(error: Error, preserve?: { kind: 'rpc' | 'respond' | 'rebind' | 'settings' | 'devtools'; id: string }): void {
     for (const [id, entry] of pending) {
       if (preserve?.kind === 'rpc' && preserve.id === id) continue
       entry.reject(error)
@@ -263,6 +307,11 @@ export function connectPanel(): PanelApi {
       if (preserve?.kind === 'settings' && preserve.id === id) continue
       entry.reject(error)
       pendingSettings.delete(id)
+    }
+    for (const [id, entry] of pendingDetaches) {
+      if (preserve?.kind === 'devtools' && preserve.id === id) continue
+      entry.reject(error)
+      pendingDetaches.delete(id)
     }
   }
 
@@ -298,7 +347,7 @@ export function connectPanel(): PanelApi {
   function invalidate(
     stale: chrome.runtime.Port,
     error: Error,
-    preserve?: { kind: 'rpc' | 'respond' | 'rebind' | 'settings'; id: string },
+    preserve?: { kind: 'rpc' | 'respond' | 'rebind' | 'settings' | 'devtools'; id: string },
   ): void {
     if (port !== stale) return
     port = null
@@ -313,7 +362,7 @@ export function connectPanel(): PanelApi {
    */
   function send(
     message: unknown,
-    preserve?: { kind: 'rpc' | 'respond' | 'rebind' | 'settings'; id: string },
+    preserve?: { kind: 'rpc' | 'respond' | 'rebind' | 'settings' | 'devtools'; id: string },
   ): Promise<void> {
     const current = port
     if (current !== null) {
@@ -405,6 +454,25 @@ export function connectPanel(): PanelApi {
     onSessionResumeHint(callback) {
       sessionResumeHintListeners.add(callback)
       return () => { sessionResumeHintListeners.delete(callback) }
+    },
+    onDevToolsStatus(callback) {
+      devToolsStatusListeners.add(callback)
+      return () => { devToolsStatusListeners.delete(callback) }
+    },
+    detachDevTools() {
+      const id = crypto.randomUUID()
+      return new Promise<void>((resolve, reject) => {
+        const entry = { resolve, reject }
+        pendingDetaches.set(id, entry)
+        void send(
+          { type: 'devtools.detach', id },
+          { kind: 'devtools', id },
+        ).catch((cause: unknown) => {
+          if (pendingDetaches.get(id) !== entry) return
+          pendingDetaches.delete(id)
+          reject(connectionError(cause))
+        })
+      })
     },
     respondToApproval(id, decision) {
       return send({ type: 'approval.response', id, decision })

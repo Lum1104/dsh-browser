@@ -2225,6 +2225,44 @@ textarea:focus-visible {
   box-shadow: var(--focus-ring);
 }
 
+.setting-toggle-input:disabled + .setting-toggle-control {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* The developer-tools switch owns more than one line of detail and can offer a
+   detach action, so it gets a row wrapper while staying one settings entry. */
+.settings .setting-toggle-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 13px;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings .setting-toggle-row > label.setting-toggle {
+  flex: 1 1 auto;
+  padding: 0;
+  border-bottom: 0;
+}
+
+/* The state reads as the switch's own detail line, not as a sibling setting. */
+.settings label.setting-toggle .devtools-status {
+  color: var(--faint);
+  font-size: calc(9.5px * var(--ui-scale));
+  line-height: 1.45;
+}
+
+.settings label.setting-toggle .devtools-status.is-error {
+  color: var(--danger);
+}
+
+.settings .setting-toggle-row > button.secondary {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .settings input,
 .settings select {
   width: 100%;

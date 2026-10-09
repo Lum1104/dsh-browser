@@ -1,7 +1,7 @@
 /** Shared panel/background contract for browser action approval. */
 
 export type ApprovalKind = 'read' | 'action'
-export type ApprovalDecision = 'deny' | 'allow-once' | 'always-allow-reads' | 'trust-session' | 'trust-origin'
+export type ApprovalDecision = 'deny' | 'allow-once' | 'always-allow-reads' | 'trust-session' | 'trust-origin' | 'trust-dev-tools'
 /** Background authorization result; transport failures must not masquerade as a user decision. */
 export type ApprovalAuthorization = 'approved' | 'denied' | 'unavailable' | 'timed-out' | 'cancelled'
 
@@ -13,6 +13,12 @@ export interface ApprovalPrompt {
   origins: string[]
   /** True only when one stable origin can safely be added to the action allowlist. */
   canTrust: boolean
+  /**
+   * Marks the high-privilege developer-tools group: the panel renders it as its
+   * own consent surface and the background never satisfies it from the origin
+   * allowlist or unrestricted access.
+   */
+  devTools?: true
 }
 
 /** Correlated request delivered to every open side-panel view. */
@@ -28,4 +34,5 @@ export function isApprovalDecision(value: unknown): value is ApprovalDecision {
     || value === 'always-allow-reads'
     || value === 'trust-session'
     || value === 'trust-origin'
+    || value === 'trust-dev-tools'
 }

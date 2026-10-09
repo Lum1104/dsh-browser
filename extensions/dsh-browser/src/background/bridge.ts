@@ -51,6 +51,13 @@ export class BridgeClient {
     private readonly probe: BridgeProbe = async () => true,
     /** Whether a disconnected client still has an active user-owned lease. */
     private readonly shouldReconnect: () => boolean = () => true,
+    /**
+     * Capabilities this build can serve beyond the text snapshot contract.
+     * Advertised on every `hello`: the host registers the developer-tools group
+     * only for an extension that claims it, and the user's own setting still
+     * gates every call.
+     */
+    private readonly capabilities: Pick<BridgeCaps, 'devTools'> = {},
   ) {}
 
   /** Current coarse state (mirrors the last emitted sink value). */
@@ -152,7 +159,12 @@ export class BridgeClient {
       socket.send(JSON.stringify({
         t: 'hello',
         token: this.token,
-        caps: { textOnly: true, snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS, maxInteractiveItems: 60 },
+        caps: {
+          textOnly: true,
+          snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS,
+          maxInteractiveItems: 60,
+          ...this.capabilities,
+        },
       } satisfies ClientFrame))
 
       let authed = false
