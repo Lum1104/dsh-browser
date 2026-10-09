@@ -128,3 +128,47 @@ describe('BridgeClient connection probe', () => {
     expect(FakeWebSocket.instances).toHaveLength(1)
   })
 })
+
+describe('bridge capability advertisement', () => {
+  /** Capture the first frame the client sends, which is always `hello`. */
+  async function firstFrame(capabilities: { devTools?: { version: 1 } }): Promise<Record<string, unknown>> {
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const client = new BridgeClient({
+      onStateChange: () => {},
+      onFrame: () => {},
+      onHelloOk: () => {},
+    }, async () => true, () => true, capabilities)
+    client.start('ws://127.0.0.1:3080/ext/bridge', 'token')
+    await vi.advanceTimersByTimeAsync(0)
+    const socket = FakeWebSocket.instances.at(-1)!
+    const sent: Record<string, unknown>[] = []
+    ;(socket as unknown as { send: (data: string) => void }).send = (data: string) => { sent.push(JSON.parse(data) as Record<string, unknown>) }
+    socket.open()
+    await vi.advanceTimersByTimeAsync(0)
+    client.stop()
+    return sent[0]!
+  }
+
+  it('advertises the developer-tools capability the host needs to register its group', async () => {
+    const frame = await firstFrame({ devTools: { version: 1 } })
+    expect(frame).toMatchObject({
+      t: 'hello',
+      token: 'token',
+      caps: {
+        textOnly: true,
+        snapshotMaxChars: 32_000,
+        maxInteractiveItems: 60,
+        devTools: { version: 1 },
+      },
+    })
+  })
+
+  it('omits the capability on a platform that cannot serve it', async () => {
+    const frame = await firstFrame({})
+    const caps = frame.caps as Record<string, unknown>
+    expect(caps.textOnly).toBe(true)
+    // An absent field is what keeps the host from registering unusable tools.
+    expect('devTools' in caps).toBe(false)
+  })
+})

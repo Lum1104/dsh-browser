@@ -50,4 +50,18 @@ describe('Firefox build contract', () => {
       'websiteContent',
     ])
   })
+
+  it('declares the debugger permission for developer tools on Chrome only', async () => {
+    const [chromeManifest, firefoxManifest] = await Promise.all([
+      readJson<ExtensionManifest>('../manifest.json'),
+      readJson<ExtensionManifest>('../manifest.firefox.json'),
+    ])
+    // Chrome serves the developer-tools group through chrome.debugger; the
+    // Firefox build omits the API (and its permission), so the plugin keeps
+    // those tools unregistered there.
+    expect(chromeManifest.permissions).toContain('debugger')
+    expect(firefoxManifest.permissions).not.toContain('debugger')
+    expect(chromeManifest.permissions).toContain('sidePanel')
+    expect(chromeManifest.permissions).toContain('notifications')
+  })
 })

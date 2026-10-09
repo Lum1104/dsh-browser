@@ -1,10 +1,37 @@
 import { describe, expect, it } from 'vitest'
-import { isClientFrame, isServerFrame, parseBridgeFrame } from '../src/protocol.ts'
+import {
+  DEVTOOLS_CAPS_VERSION,
+  DEVTOOLS_TOOL_NAMES,
+  isClientFrame,
+  isDevToolsCaps,
+  isServerFrame,
+  parseBridgeFrame,
+} from '../src/protocol.ts'
 
 describe('parseBridgeFrame', () => {
   it('parses a valid hello frame', () => {
     const frame = parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'abc123', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } }))
     expect(frame).toEqual({ t: 'hello', token: 'abc123', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+  })
+
+  it('accepts the optional developer-tools capability', () => {
+    const withDevTools = { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60, devTools: { version: DEVTOOLS_CAPS_VERSION } }
+    expect(parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'x', caps: withDevTools })))
+      .toEqual({ t: 'hello', token: 'x', caps: withDevTools })
+    // An older extension omits the field and still authenticates.
+    const legacy = { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 }
+    expect(parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'x', caps: legacy }))).toBeDefined()
+    // An unknown version is not usable, so the frame is rejected outright.
+    expect(parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'x', caps: { ...legacy, devTools: { version: 99 } } }))).toBeUndefined()
+    expect(isDevToolsCaps({ version: DEVTOOLS_CAPS_VERSION })).toBe(true)
+    expect(isDevToolsCaps({})).toBe(false)
+    expect(isDevToolsCaps(undefined)).toBe(false)
+  })
+
+  it('exposes the nine documented developer-tools names', () => {
+    expect(DEVTOOLS_TOOL_NAMES).toHaveLength(9)
+    expect(new Set(DEVTOOLS_TOOL_NAMES).size).toBe(9)
+    expect([...DEVTOOLS_TOOL_NAMES]).toContain('browser_console_eval')
   })
 
   it('rejects hello with wrong caps shape', () => {
