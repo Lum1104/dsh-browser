@@ -29,6 +29,7 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { BridgeServer } from './server.ts'
 import { BrowserContextInjector } from './browser-context.ts'
 import { registerBrowserTools } from './tools.ts'
+import { registerScreenshotTool } from './screenshot-tools.ts'
 import {
   BRIDGE_CONFIG_PATH,
   BRIDGE_PATH,
@@ -255,7 +256,13 @@ function mountBridge(
       snapshotMaxChars: resolved.snapshotMaxChars,
       maxInteractiveItems: resolved.maxInteractiveItems,
     })
-    return () => { for (const dispose of disposers.values()) dispose() }
+    const disposeScreenshot = registerScreenshotTool(ctx, server, {
+      toolTimeoutMs: resolved.toolTimeoutMs,
+    })
+    return () => {
+      disposeScreenshot()
+      for (const dispose of disposers.values()) dispose()
+    }
   }, 'bridge-browser: browser tools')
 
   // Optional system-prompt contribution: a one-line hint only — the model is
@@ -267,7 +274,8 @@ function mountBridge(
       order: 107,
       text: 'A browser bridge may be connected. To read or operate the user\'s active browser page, call browser_snapshot '
         + '(text-only; numbered items are the click/type targets), unless the current turn already includes a plugin-provided '
-        + 'followed-page browser_snapshot. Reuse that injected snapshot and its indices directly. Never assume page content you have not snapshotted.',
+        + 'followed-page browser_snapshot. Reuse that injected snapshot and its indices directly. Never assume page content you have not snapshotted. '
+        + 'When visual appearance matters, call browser_screenshot to capture the controlled tab viewport as an image.',
     }), 'bridge-browser: system prompt section')
   }
 

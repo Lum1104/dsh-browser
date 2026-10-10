@@ -655,6 +655,104 @@ async function dispatchTabManagementTool(
   return unavailable(`Unsupported tab-management tool: ${call.name}`)
 }
 
+/** Parse the model-supplied screenshot capture options. */
+function screenshotCaptureOptions(call: ToolCall): { format: 'png' | 'jpeg'; quality: number } | ToolAnswer {
+  const format = call.args.format === undefined ? 'png' : call.args.format
+  if (format !== 'png' && format !== 'jpeg') {
+    return { ok: false, error: { code: 'action-failed', message: 'format must be "png" or "jpeg".' } }
+  }
+  const quality = call.args.quality === undefined ? 85 : call.args.quality
+  if (typeof quality !== 'number' || !Number.isInteger(quality) || quality < 1 || quality > 100) {
+    return { ok: false, error: { code: 'action-failed', message: 'quality must be an integer between 1 and 100.' } }
+  }
+  return { format, quality }
+}
+
+/** Decode a captureVisibleTab data URL into base64 pixels and media type. */
+function decodeCaptureDataUrl(dataUrl: string): { data: string; mediaType: string } | undefined {
+  const comma = dataUrl.indexOf(',')
+  if (comma === -1) return undefined
+  const header = /^data:([^;,]+);base64$/.exec(dataUrl.slice(0, comma))
+  if (header === null) return undefined
+  const data = dataUrl.slice(comma + 1)
+  return data === '' ? undefined : { data, mediaType: header[1] ?? '' }
+}
+
+async function measureImageBytes(data: string, mediaType: string): Promise<{ width: number; height: number } | undefined> {
+  try {
+    const binary = atob(data)
+    const bytes = new Uint8Array(binary.length)
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+    const bitmap = await createImageBitmap(new Blob([bytes as BlobPart], { type: mediaType }))
+    try {
+      return { width: bitmap.width, height: bitmap.height }
+    } finally {
+      bitmap.close()
+    }
+  } catch {
+    // Dimensions are advisory metadata; the capture stays deliverable.
+    return undefined
+  }
+}
+
+/**
+ * Capture the controlled tab's viewport. `captureVisibleTab` photographs the
+ * active tab of the window, so a controlled-but-inactive tab is a hard error
+ * rather than a silent capture of the wrong page.
+ */
+async function dispatchScreenshot(
+  tab: Pick<chrome.tabs.Tab, 'id' | 'url'> & { active?: boolean; windowId?: number },
+  call: ToolCall,
+  signal?: AbortSignal,
+  targetStillAllowed?: () => boolean,
+): Promise<ToolAnswer> {
+  if (isCancelled(call, signal)) return cancelled()
+  if (targetStillAllowed?.() === false) return targetChanged()
+  const options = screenshotCaptureOptions(call)
+  if ('ok' in options) return options
+  let active = tab.active
+  let windowId = tab.windowId
+  if (active === undefined || windowId === undefined) {
+    const fresh = await findTab(tab.id!)
+    if (fresh === undefined) return unavailable('The controlled tab closed before the screenshot was captured.')
+    active = fresh.active
+    windowId = fresh.windowId
+  }
+  if (isCancelled(call, signal)) return cancelled()
+  if (targetStillAllowed?.() === false) return targetChanged()
+  if (active !== true) {
+    return unavailable('The controlled tab is not the active tab of its window, so its viewport cannot be captured. Activate the tab first, then retry.')
+  }
+  if (windowId === undefined) {
+    return unavailable('The controlled tab has no window, so its viewport cannot be captured.')
+  }
+  let dataUrl: string
+  try {
+    dataUrl = await chrome.tabs.captureVisibleTab(windowId, {
+      format: options.format,
+      ...(options.format === 'jpeg' ? { quality: options.quality } : {}),
+    })
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return unavailable(`The screenshot could not be captured: ${detail}`)
+  }
+  if (isCancelled(call, signal)) return cancelled()
+  if (targetStillAllowed?.() === false) return targetChanged()
+  const captured = decodeCaptureDataUrl(dataUrl)
+  if (captured === undefined) return unavailable('The browser returned the screenshot in an unsupported format.')
+  const dimensions = await measureImageBytes(captured.data, captured.mediaType)
+  return {
+    ok: true,
+    result: {
+      image: {
+        data: captured.data,
+        mediaType: captured.mediaType,
+        ...dimensions === undefined ? {} : dimensions,
+      },
+    },
+  }
+}
+
 /**
  * Dispatch one tool call to the selected tab's content script.
  * @param call - the tool call to execute.
@@ -689,7 +787,7 @@ export async function dispatchToolCall(
   // Privacy boundary: with sharing off, no page content may leave the page.
   if (!tabManagement.unrestrictedAccess
     && sharePageContent === 'off'
-    && (call.name === 'browser_snapshot' || call.name === 'browser_get_text')) {
+    && (call.name === 'browser_snapshot' || call.name === 'browser_get_text' || call.name === 'browser_screenshot')) {
     return { ok: false, error: { code: 'action-failed', message: 'Page content sharing is disabled in Settings > Page content sharing.' } }
   }
   const tab = targetTab ?? (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]
@@ -703,7 +801,7 @@ export async function dispatchToolCall(
   if (targetStillAllowed?.() === false) return targetChanged()
   const frameError = validateFrameTarget(call, frames)
   if (frameError !== undefined) return frameError
-  if (!isInjectablePage(tab.url) && !TAB_NATIVE_TOOLS.has(call.name)) {
+  if (!isInjectablePage(tab.url) && !TAB_NATIVE_TOOLS.has(call.name) && call.name !== 'browser_screenshot') {
     return unavailable('The current page DOM is protected by the browser. Only snapshot metadata, navigate, back, forward, and reload are available on this page.')
   }
   const targetError = validateElementTarget(call, tab.id, frames)
@@ -734,8 +832,14 @@ export async function dispatchToolCall(
     if (refreshedTargetError !== undefined) return refreshedTargetError
   }
   if (!isInjectablePage(tab.url)) {
+    if (call.name === 'browser_screenshot') {
+      return unavailable('A screenshot cannot be captured on this page: the browser protects pages outside http and https.')
+    }
     return await dispatchTabNativeTool(tab.id, tab.url, tab.title, tab.windowId, call, effectiveBudget, signal, targetStillAllowed, tabManagement.commitAction)
       ?? unavailable('The current page DOM is protected by the browser.')
+  }
+  if (call.name === 'browser_screenshot') {
+    return await dispatchScreenshot(tab, call, signal, targetStillAllowed)
   }
   try {
     return await dispatchOnce(
