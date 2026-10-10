@@ -5,7 +5,7 @@ import type { TabFrame } from './frames.ts'
 import type { ApprovalPrompt } from '../security/approval.ts'
 import { getUiLocale, type UiLocale } from '../i18n.ts'
 
-const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text', 'browser_screenshot'])
+const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text'])
 const STATE_CHANGING_ACTIONS = new Set([
   'browser_click',
   'browser_type',
@@ -24,6 +24,18 @@ export function approvalPromptForCall(
   frames: TabFrame[],
   locale: UiLocale = getUiLocale(),
 ): ApprovalPrompt | undefined {
+  // A screenshot photographs exactly what the user sees — passwords, private
+  // messages, account balances included — so it always prompts, regardless of
+  // the page-content sharing preference. Only unrestricted access skips it.
+  if (call.name === 'browser_screenshot') {
+    return {
+      kind: 'read',
+      action: call.name,
+      summary: localized(locale, 'Capture a screenshot of the current page (may contain sensitive content)', '截取当前页面的可视区域截图（可能包含敏感信息）'),
+      origins: uniqueOrigins(frames, frames),
+      canTrust: false,
+    }
+  }
   if (PAGE_READS.has(call.name)) {
     if (sharePageContent !== 'ask') return undefined
     const targetFrames = call.name === 'browser_get_text'
@@ -34,9 +46,7 @@ export function approvalPromptForCall(
       action: call.name,
       summary: call.name === 'browser_snapshot'
         ? localized(locale, 'Read the current page and accessible iframes', '读取当前页面及可访问 iframe')
-        : call.name === 'browser_screenshot'
-          ? localized(locale, 'Capture a screenshot of the current page', '截取当前页面的可视区域')
-          : localized(locale, 'Read text from the specified area of the current page', '读取当前页面的指定文本区域'),
+        : localized(locale, 'Read text from the specified area of the current page', '读取当前页面的指定文本区域'),
       origins: uniqueOrigins(targetFrames, frames),
       canTrust: false,
     }
