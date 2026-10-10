@@ -4,7 +4,7 @@ English | [中文](README.zh.md)
 
 The **browser-operation end** of dsh: the model reads and operates the browser page you have open — extract content, click elements, fill forms, scroll, and navigate, all in the real page with your login state preserved. The side panel is the conversation entry.
 
-**Two explicit channels**: browser pages are still rendered as structured text (a numbered interactive-element inventory), so browser tools never take screenshots. Separately, a dsh 0.1.2 host can advertise multimodal image limits; the side panel then accepts PNG, JPEG, WebP, and GIF attachments and renders their durable history references.
+**Text-first page interface, one image route**: browser pages are rendered as structured text (a numbered interactive-element inventory) and operated by number. `browser_screenshot` is the exception: it captures the visible area, the bridge saves those bytes to a local file, and the model is given that path rather than image data. Separately, a dsh 0.1.2 host can advertise multimodal image limits; the side panel then accepts PNG, JPEG, WebP, and GIF attachments and renders their durable history references.
 
 ## What the model can do
 
@@ -20,6 +20,7 @@ The **browser-operation end** of dsh: the model reads and operates the browser p
 | Follow tab | `browser_follow_tab` | Bind later browser tools to a listed tab without activating it |
 | Close tab | `browser_close_tab` | Close a listed tab |
 | Read region | `browser_get_text` | Lazy-loaded content / partial text |
+| Capture the view | `browser_screenshot` | Saves the visible area as a local image file and returns its path for `read_image`. Use it when the meaning is visual (captcha, chart, layout). `format` is `jpeg` (default) or `png`, with an optional `quality` of 1–100 |
 | Wait | `browser_wait` | Page load and render-settle detection |
 | Chat with images | `session.prompt` / `session.attachment` | Host-gated image selection, image-only sends, and durable history previews |
 | Quote what you highlight | side panel composer | The text you select in the page becomes a quote in the composer and rides along with your next message |
@@ -101,13 +102,14 @@ The recommended zero-configuration command does not require Git or a local clone
 
 3. **Use it**: open a normal `http://` or `https://` page and click the DeepSeek whale icon. Both builds auto-discover local dsh. Chrome loopback connections need no address or token; Firefox must be given the token from `~/.dsh/ext-bridge-token` because a `moz-extension://` UUID is not an add-on identity. Chat directly or click "Read page" first.
 
-Pages that were already open before extension installation or reload are instrumented automatically on the first action, so they do not require a manual refresh. Browser-internal and protected pages such as `chrome://` and the Chrome Web Store expose only tab metadata and browser-level HTTP(S) navigation, back, forward, and reload; their DOM cannot be read or operated.
+Pages that were already open before extension installation or reload are instrumented automatically on the first action, so they do not require a manual refresh. Browser-internal and protected pages such as `chrome://` and the Chrome Web Store expose only tab metadata, browser-level HTTP(S) navigation, back, forward, reload, and `browser_screenshot` (the capture is taken by the browser, not by the page); their DOM cannot be read or operated.
 
 For extension-only development, load `extensions/dsh-browser/dist/` from `chrome://extensions`, or run `build:firefox` and load `extensions/dsh-browser/dist-firefox/manifest.json` from `about:debugging#/runtime/this-firefox`. Rebuild and reload after code changes.
 
-## Why browser operation stays text-only
+## Why browser operation is text-first
 
 - **Snapshot as the view**: the model's entire view of the page is structured text (title/URL/main/numbered elements/forms), budgeted at 32k chars by default (plugin-configurable, negotiated to the extension via `hello.ok`).
+- **One deliberate image route**: `browser_screenshot` photographs the visible area — through `chrome.tabs.captureVisibleTab` first, and through the DevTools protocol (`Page.captureScreenshot`) whenever that call is refused, so the answer says which route produced the image. The extension returns the pixels as base64 beside its text, the bridge writes them to a file under the OS temp directory, and the model receives the path. Image bytes never enter the conversation, and the fallback needs the optional `debugger` permission, which the side panel Settings can grant or withhold.
 - **Page text is untrusted input**: snapshots and targeted text reads are enclosed in a fresh nonce-bound trust marker and explicitly tell the model never to treat page-authored commands as instructions. This is defense in depth; extension-side action approval is the enforcement boundary.
 - **Stable numbering**: element numbers persist across snapshots (WeakMap + `data-dsh-el`), so the model can say "click 7"; a large page change explicitly reports "numbers reindexed".
 - **Delta mode**: `browser_snapshot({delta:true})` returns only changed element numbers, saving tokens.
@@ -119,14 +121,14 @@ For extension-only development, load `extensions/dsh-browser/dist/` from `chrome
 
 ## Permissions
 
-Chrome uses `sidePanel`; Firefox uses `sidebar_action`. Both request `storage` (settings and recent-session continuity), `notifications` (optional reminders for approvals received while the panel is closed), `tabs` + `activeTab` + `scripting` (observe tab changes and inject/message the explicitly controlled tab, including lazy recovery for pages opened before install), `webNavigation` (enumerate and bind messages to that tab's frame documents), `alarms` (background keepalive), and `http/https` (content-script injection on normal pages). Firefox's AMO manifest declares the browsing activity, website content/activity, and personal communications that the add-on sends to the configured dsh/model service. The extension never changes the visible tab or silently follows a manual switch; background operation happens only after the user chooses to stay on the original tab.
+Chrome uses `sidePanel`; Firefox uses `sidebar_action`. Both request `storage` (settings and recent-session continuity), `notifications` (optional reminders for approvals received while the panel is closed), `tabs` + `activeTab` + `scripting` (observe tab changes and inject/message the explicitly controlled tab, including lazy recovery for pages opened before install), `webNavigation` (enumerate and bind messages to that tab's frame documents), `alarms` (background keepalive), and `http/https` (content-script injection on normal pages). They also declare `debugger` as an **optional** permission: it is never requested at install time, the browser's "being controlled" banner appears only while a capture runs, and Settings offers an explicit button that calls `chrome.permissions.request`. Firefox's AMO manifest declares the browsing activity, website content/activity, and personal communications that the add-on sends to the configured dsh/model service. The extension never changes the visible tab or silently follows a manual switch; background operation happens only after the user chooses to stay on the original tab.
 
 ## Known limitations
 
 - Only one extension connection at a time. An unopened browser profile never claims it; if another open panel replaces a live connection, the replaced client yields instead of starting a reconnect fight.
 - Tab affinity is global to that extension connection rather than per chat session.
 - Accessible cross-origin iframes are snapshotted and operated with stable `(frame, index)` addresses. Restricted or short-lived frames are reported as unavailable without failing the whole page snapshot.
-- Captcha/image-only controls cannot be handled — the tool result reports "elements with no accessible name" and asks the user to complete that step manually.
+- Captcha/image-only controls are reported as "elements with no accessible name". `browser_screenshot` lets the model see them, but the user still has to solve them.
 - No automatic token rotation.
 - Synthetic `browser_press` events do not trigger browser-native default actions such as Tab focus movement, arrow-key scrolling, or Enter activation; use manual input when a workflow depends on those defaults.
 - `browser_wait` considers page load plus a fixed quiet window, but does not observe continuously changing DOM state; a live-updating SPA may be reported as stable.

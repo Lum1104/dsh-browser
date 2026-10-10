@@ -135,6 +135,49 @@ describe('registerBrowserTools', () => {
     expect(requestTool).toHaveBeenLastCalledWith('browser_wait', {}, exec.signal, 1_000)
     await run('browser_wait', { frame: 4 })
     expect(requestTool).toHaveBeenLastCalledWith('browser_wait', { frame: 4 }, exec.signal, 1_000)
+
+    await run('browser_screenshot', { format: 'png', quality: 40 })
+    expect(requestTool).toHaveBeenLastCalledWith(
+      'browser_screenshot',
+      { format: 'png', quality: 40 },
+      exec.signal,
+      1_000,
+    )
+    // The wire carries only what the model actually asked for.
+    await run('browser_screenshot', {})
+    expect(requestTool).toHaveBeenLastCalledWith('browser_screenshot', {}, exec.signal, 1_000)
+  })
+
+  it('writes a returned screenshot to a file and hands the model its path', async () => {
+    const { ctx, bridge, requestTool, registered } = makeHarness()
+    registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    // 'QUJD' is base64 for the three bytes ABC.
+    requestTool.mockResolvedValueOnce({ text: 'captured', screenshot: { mime: 'image/png', base64: 'QUJD' } })
+    const tool = registered.find((r) => r.name === 'browser_screenshot')!
+    const result = await (tool.definition.execute as (args: unknown, e: { signal: AbortSignal }) => Promise<{ text: string }>)(
+      {},
+      { signal: new AbortController().signal },
+    )
+
+    // The base64 must not survive into the model's view; only a path may.
+    expect(result.text).toContain('captured')
+    expect(result.text).not.toContain('QUJD')
+    // Find the path by the directory the implementation documents, not by its
+    // shape: a Windows-only pattern such as C:\... passes on the author's
+    // machine and fails the Linux runner, which is how this test first shipped.
+    const { join } = await import('node:path')
+    const { tmpdir } = await import('node:os')
+    const directory = join(tmpdir(), 'dsh-browser-screenshots')
+    const at = result.text.indexOf(directory)
+    expect(at).toBeGreaterThan(-1)
+    const file = result.text.slice(at).split('\n')[0].trim()
+    expect(file.endsWith('.png')).toBe(true)
+    const { readFileSync, rmSync } = await import('node:fs')
+    try {
+      expect(readFileSync(file, 'utf8')).toBe('ABC')
+    } finally {
+      rmSync(file, { force: true })
+    }
   })
 
   it('normalizes every DSH parameter map to JSON Schema before registration', () => {
@@ -175,7 +218,10 @@ describe('registerBrowserTools', () => {
     const { ctx, bridge, registered } = makeHarness()
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
     const descriptionChars = registered.reduce((sum, { definition }) => sum + String(definition.description).length, 0)
-    expect(descriptionChars).toBeLessThan(1_500)
+    // Raised from 1,500 when browser_screenshot added its own description to a
+    // 15-tool set. The budget guards against bloat in any one description and
+    // tracks how many tools exist, so it moves with the tool surface.
+    expect(descriptionChars).toBeLessThan(1_800)
   })
 
   it('exposes optional frame routing on frame-local tools only', () => {

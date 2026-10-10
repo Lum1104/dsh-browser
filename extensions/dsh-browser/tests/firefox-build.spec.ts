@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 interface ExtensionManifest {
   version: string
   permissions: string[]
+  optional_permissions?: string[]
   background: Record<string, unknown>
   content_security_policy: { extension_pages: string }
   browser_specific_settings?: {
@@ -49,5 +50,19 @@ describe('Firefox build contract', () => {
       'websiteActivity',
       'websiteContent',
     ])
+  })
+
+  it('keeps the debugger permission optional so the screenshot fallback stays opt-in', async () => {
+    const [chromeManifest, firefoxManifest] = await Promise.all([
+      readJson<ExtensionManifest>('../manifest.json'),
+      readJson<ExtensionManifest>('../manifest.firefox.json'),
+    ])
+
+    for (const manifest of [chromeManifest, firefoxManifest]) {
+      // A required `debugger` permission would put every user under the
+      // browser's "being controlled" banner at install time.
+      expect(manifest.permissions).not.toContain('debugger')
+      expect(manifest.optional_permissions).toContain('debugger')
+    }
   })
 })

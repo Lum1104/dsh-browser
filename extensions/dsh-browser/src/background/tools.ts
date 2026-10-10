@@ -1,6 +1,7 @@
 /**
  * Tool dispatch: executes `tool.call` frames in an explicitly selected tab via
- * the content script and answers with the text-only result.
+ * the content script or the DevTools protocol and answers with text, carrying
+ * captured image bytes alongside it when a screenshot was requested.
  *
  * The background service owns tab-affinity policy. Direct callers may omit a
  * target for backward-compatible active-tab dispatch in isolated tests.
@@ -252,6 +253,162 @@ async function dispatchTabNativeTool(
   if (isCancelled(call, signal)) return cancelled()
   if (targetStillAllowed?.() === false) return targetChanged()
   return { ok: true, result: { text, navigationPending: true } }
+}
+
+/**
+ * Give the compositor one frame to present a tab that was just brought forward.
+ * `captureVisibleTab` photographs whatever is painted, so shooting immediately
+ * after `tabs.update` can still catch the previous tab.
+ */
+async function settleAfterActivation(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 120))
+}
+
+/** Build the answer for a viewport capture, naming the route that produced it. */
+function viewportScreenshotAnswer(base64: string, format: string, route: string, note: string): ToolAnswer {
+  if (base64 === '') return unavailable('The browser returned an empty screenshot.')
+  // `format` arrives as the bare subtype ('jpeg' / 'png'): the data URL's own
+  // `image/...` prefix is stripped before it reaches here.
+  const bare = format.replace(/^image\//, '')
+  return {
+    ok: true,
+    result: {
+      text: `Captured the visible area of the controlled tab${note} as image/${bare} ${route}.`,
+      screenshot: { mime: `image/${bare}`, base64 },
+    },
+  }
+}
+
+/**
+ * Capture the visible area of one tab and hand the pixels back to the bridge.
+ *
+ * `captureVisibleTab` always photographs the active tab of a window, so a
+ * background target is brought to the front first — otherwise the model would
+ * receive a picture of whatever the user happened to be looking at instead.
+ *
+ * That call also needs the extension to hold `<all_urls>` or `activeTab` for the
+ * photographed tab, which is exactly the permission a hosted build can withhold
+ * from the user's site-access choice; when it is, the call fails with "Either the
+ * '<all_urls>' or 'activeTab' permission is required". The DevTools protocol is
+ * therefore the fallback for any failure of that call, and it needs no
+ * activation at all: its pixels come from the renderer.
+ */
+async function dispatchScreenshot(
+  tabId: number,
+  windowId: number | undefined,
+  call: ToolCall,
+  signal?: AbortSignal,
+): Promise<ToolAnswer> {
+  if (isCancelled(call, signal)) return cancelled()
+  const format = call.args.format === 'png' ? 'png' : 'jpeg'
+  const requestedQuality = typeof call.args.quality === 'number' ? call.args.quality : 85
+  const quality = Math.min(100, Math.max(1, Math.round(requestedQuality)))
+  try {
+    const tab = await chrome.tabs.get(tabId)
+    let activated = false
+    if (!tab.active) {
+      await chrome.tabs.update(tabId, { active: true })
+      activated = true
+      // Give the compositor one frame to present the newly activated tab.
+      await settleAfterActivation()
+    }
+    if (isCancelled(call, signal)) return cancelled()
+    const dataUrl = await chrome.tabs.captureVisibleTab(
+      windowId ?? tab.windowId,
+      format === 'png' ? { format: 'png' } : { format: 'jpeg', quality },
+    )
+    const match = /^data:([^;,]+);base64,(.*)$/s.exec(dataUrl)
+    if (match === null) return unavailable('The browser returned a screenshot in an unexpected format.')
+    const note = activated ? ' (the tab was brought to the front first)' : ''
+    return viewportScreenshotAnswer(match[2] ?? '', match[1] ?? format, 'via chrome.tabs.captureVisibleTab', note)
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return await captureViewportThroughDebugger(tabId, format, quality, detail)
+  }
+}
+
+/**
+ * Fallback viewport capture, used when `captureVisibleTab` fails for any reason.
+ * It waits one frame first so a tab that was just activated has presented, then
+ * shoots through the protocol.
+ */
+async function captureViewportThroughDebugger(
+  tabId: number,
+  format: string,
+  quality: number,
+  captureDetail: string,
+): Promise<ToolAnswer> {
+  return await runWithDebugger(tabId, async (target) => {
+    try {
+      await settleAfterActivation()
+      const answer = await chrome.debugger.sendCommand(target, 'Page.captureScreenshot', {
+        format,
+        ...format === 'jpeg' ? { quality } : {},
+        fromSurface: true,
+      }) as { data?: string }
+      const base64 = typeof answer?.data === 'string' ? answer.data : ''
+      if (base64 === '') {
+        return unavailable(`The screenshot could not be taken: ${captureDetail}`)
+      }
+      return viewportScreenshotAnswer(
+        base64,
+        format,
+        `through the debugger, because captureVisibleTab was refused: ${captureDetail}`,
+        '',
+      )
+    } catch (error: unknown) {
+      const fallbackDetail = error instanceof Error ? error.message : String(error)
+      return unavailable(
+        `The screenshot could not be taken: ${captureDetail} (the debugger fallback failed too: ${fallbackDetail})`,
+      )
+    }
+  })
+}
+
+/**
+ * Run one DevTools-protocol task against a tab, attaching first and always
+ * detaching afterwards.
+ *
+ * MV3 gives the extension no way to read renderer pixels or synthesise trusted
+ * input, so the debugger is the only route to either. Attaching is what raises
+ * the browser's "being controlled" banner, which is why a session is never held
+ * open between calls — detaching in `finally` is what takes the banner back down.
+ *
+ * `debugger` is an optional permission, so the user has to grant it once from
+ * the side panel before any protocol route can run; when it is missing the
+ * answer names the exact switch that grants it.
+ */
+async function runWithDebugger(
+  tabId: number,
+  run: (target: chrome.debugger.Debuggee) => Promise<ToolAnswer>,
+): Promise<ToolAnswer> {
+  let granted = false
+  try {
+    granted = await chrome.permissions.contains({ permissions: ['debugger'] })
+  } catch {
+    granted = false
+  }
+  if (!granted) {
+    return unavailable(
+      'This needs the "debugger" permission, which this extension has not been granted. Open the side panel Settings and turn on "Screenshot capture (debugger)" to allow it.',
+    )
+  }
+  const target = { tabId }
+  try {
+    await chrome.debugger.attach(target, '1.3')
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return unavailable(`Could not attach the debugger: ${detail}. DevTools open on this tab will block it.`)
+  }
+  try {
+    return await run(target)
+  } finally {
+    try {
+      await chrome.debugger.detach(target)
+    } catch {
+      // Already detached; nothing left to release.
+    }
+  }
 }
 
 function cancelled(): ToolAnswer {
@@ -689,7 +846,7 @@ export async function dispatchToolCall(
   // Privacy boundary: with sharing off, no page content may leave the page.
   if (!tabManagement.unrestrictedAccess
     && sharePageContent === 'off'
-    && (call.name === 'browser_snapshot' || call.name === 'browser_get_text')) {
+    && (call.name === 'browser_snapshot' || call.name === 'browser_get_text' || call.name === 'browser_screenshot')) {
     return { ok: false, error: { code: 'action-failed', message: 'Page content sharing is disabled in Settings > Page content sharing.' } }
   }
   const tab = targetTab ?? (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]
@@ -703,7 +860,9 @@ export async function dispatchToolCall(
   if (targetStillAllowed?.() === false) return targetChanged()
   const frameError = validateFrameTarget(call, frames)
   if (frameError !== undefined) return frameError
-  if (!isInjectablePage(tab.url) && !TAB_NATIVE_TOOLS.has(call.name)) {
+  // A viewport capture is taken by the browser itself rather than by the page,
+  // so it needs no injectable document and stays available on protected pages.
+  if (!isInjectablePage(tab.url) && !TAB_NATIVE_TOOLS.has(call.name) && call.name !== 'browser_screenshot') {
     return unavailable('The current page DOM is protected by the browser. Only snapshot metadata, navigate, back, forward, and reload are available on this page.')
   }
   const targetError = validateElementTarget(call, tab.id, frames)
@@ -732,6 +891,12 @@ export async function dispatchToolCall(
     }
     const refreshedTargetError = validateElementTarget(call, tab.id, executionFrames)
     if (refreshedTargetError !== undefined) return refreshedTargetError
+  }
+  // A screenshot is taken by the browser or the renderer rather than by the
+  // page, so it never goes through the content script. The plain tab capture
+  // comes first and the DevTools protocol is the fallback.
+  if (call.name === 'browser_screenshot') {
+    return await dispatchScreenshot(tab.id, tab.windowId, call, signal)
   }
   if (!isInjectablePage(tab.url)) {
     return await dispatchTabNativeTool(tab.id, tab.url, tab.title, tab.windowId, call, effectiveBudget, signal, targetStillAllowed, tabManagement.commitAction)
