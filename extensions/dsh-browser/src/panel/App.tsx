@@ -185,6 +185,18 @@ function isAuthFailure(cause: unknown): boolean {
     && (cause.code.includes('credential') || /\b401\b|\b403\b|invalid[ _-]?key/i.test(cause.message))
 }
 
+/** Extract image files from a paste or drop payload; empty when it carries none. */
+export function transferredImageFiles(dataTransfer: DataTransfer | null): File[] {
+  if (dataTransfer === null) return []
+  const files: File[] = []
+  for (const item of dataTransfer.items) {
+    if (item.kind !== 'file' || !item.type.startsWith('image/')) continue
+    const file = item.getAsFile()
+    if (file !== null) files.push(file)
+  }
+  return files
+}
+
 async function discoverOnce(
   api: PanelApi,
   profile: RelayProfileDraft,
@@ -2294,7 +2306,22 @@ export function App(): React.JSX.Element {
       )}
       {error !== null && <div className="error">{error}</div>}
       <footer className="composer">
-        <div className="composer-box">
+        <div
+          className="composer-box"
+          onDragOver={(event) => {
+            if (event.dataTransfer.types.includes('Files')) event.preventDefault()
+          }}
+          onDrop={(event) => {
+            const files = [...event.dataTransfer.files].filter((file) => file.type.startsWith('image/'))
+            if (files.length === 0) return
+            event.preventDefault()
+            if (imageLimits === null) {
+              setError(copy.app.imageUnavailable)
+              return
+            }
+            void addImageFiles(files)
+          }}
+        >
           {selection !== null && (
             <SelectionQuote
               selection={{ ...selection, quote: selection.text }}
@@ -2336,6 +2363,16 @@ export function App(): React.JSX.Element {
                 e.preventDefault()
                 void send()
               }
+            }}
+            onPaste={(e) => {
+              const files = transferredImageFiles(e.clipboardData)
+              if (files.length === 0) return
+              e.preventDefault()
+              if (imageLimits === null) {
+                setError(copy.app.imageUnavailable)
+                return
+              }
+              void addImageFiles(files)
             }}
             placeholder={state === 'connected' ? copy.app.connectedPlaceholder : copy.app.disconnectedPlaceholder}
             disabled={!sessionReady || busy}

@@ -24,11 +24,23 @@ export function approvalPromptForCall(
   frames: TabFrame[],
   locale: UiLocale = getUiLocale(),
 ): ApprovalPrompt | undefined {
+  // A screenshot photographs exactly what the user sees — passwords, private
+  // messages, account balances included — so it always prompts, regardless of
+  // the page-content sharing preference. Only unrestricted access skips it.
+  if (call.name === 'browser_screenshot') {
+    return {
+      kind: 'read',
+      action: call.name,
+      summary: localized(locale, 'Capture a screenshot of the current page (may contain sensitive content)', '截取当前页面的可视区域截图（可能包含敏感信息）'),
+      origins: uniqueOrigins(frames, frames),
+      canTrust: false,
+    }
+  }
   if (PAGE_READS.has(call.name)) {
     if (sharePageContent !== 'ask') return undefined
-    const targetFrames = call.name === 'browser_snapshot'
-      ? frames
-      : frames.filter((frame) => frame.frameId === requestedFrame(call.args))
+    const targetFrames = call.name === 'browser_get_text'
+      ? frames.filter((frame) => frame.frameId === requestedFrame(call.args))
+      : frames
     return {
       kind: 'read',
       action: call.name,
