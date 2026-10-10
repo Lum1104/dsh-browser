@@ -162,13 +162,21 @@ describe('registerBrowserTools', () => {
     // The base64 must not survive into the model's view; only a path may.
     expect(result.text).toContain('captured')
     expect(result.text).not.toContain('QUJD')
-    const file = /([A-Za-z]:\\[^\n]+\.png)/.exec(result.text)?.[1]
-    expect(file).toBeDefined()
+    // Find the path by the directory the implementation documents, not by its
+    // shape: a Windows-only pattern such as C:\... passes on the author's
+    // machine and fails the Linux runner, which is how this test first shipped.
+    const { join } = await import('node:path')
+    const { tmpdir } = await import('node:os')
+    const directory = join(tmpdir(), 'dsh-browser-screenshots')
+    const at = result.text.indexOf(directory)
+    expect(at).toBeGreaterThan(-1)
+    const file = result.text.slice(at).split('\n')[0].trim()
+    expect(file.endsWith('.png')).toBe(true)
     const { readFileSync, rmSync } = await import('node:fs')
     try {
-      expect(readFileSync(file!, 'utf8')).toBe('ABC')
+      expect(readFileSync(file, 'utf8')).toBe('ABC')
     } finally {
-      rmSync(file!, { force: true })
+      rmSync(file, { force: true })
     }
   })
 
